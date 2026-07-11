@@ -43,12 +43,6 @@ clankbox rm --all        # remove every clankbox container
 clankbox build           # rebuild the image
 ```
 
-Resume the last session:
-
-```bash
-clankbox continue        # runs opencode --continue in the container
-```
-
 Pass arguments through to opencode:
 
 ```bash
