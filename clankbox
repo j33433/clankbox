@@ -15,19 +15,18 @@ LABEL_KEY = "clankbox"
 LABEL_WORKDIR = "clankbox.workdir"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+# Extra env vars to forward in addition to any matching *_API_KEY.
 PASSTHROUGH_ENV = (
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENROUTER_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GROQ_API_KEY",
-    "MISTRAL_API_KEY",
-    "XAI_API_KEY",
-    "OPENCODE_API_KEY",
     "GITHUB_TOKEN",
     "GH_TOKEN",
 )
+
+
+def passthrough_env() -> list[str]:
+    """Env var names to forward: every *_API_KEY plus PASSTHROUGH_ENV."""
+    names = {key for key in os.environ if key.endswith("_API_KEY")}
+    names.update(PASSTHROUGH_ENV)
+    return sorted(names)
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -154,7 +153,7 @@ def create_container(name: str, directory: Path) -> None:
     if config.is_dir():
         args.extend(["-v", f"{config}:/home/clank/.config/opencode:ro"])
 
-    for key in PASSTHROUGH_ENV:
+    for key in passthrough_env():
         if value := os.environ.get(key):
             args.extend(["-e", f"{key}={value}"])
 

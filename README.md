@@ -60,7 +60,7 @@ clankbox run "explain this repo"
 | Network | Default podman networking (on) |
 | Disk | Shared slim image; no named volumes; `rm` drops container layer |
 | Host auth | Mounts `~/.local/share/opencode/auth.json`, `~/.config/opencode`, `~/.gitconfig`, `~/.ssh` (read-only) when present |
-| API keys | Forwards common `*_API_KEY` / `GITHUB_TOKEN` env vars if set |
+| API keys | Forwards every `*_API_KEY` env var, plus `GITHUB_TOKEN` / `GH_TOKEN`, if set |
 
 Containers are labeled `clankbox=1` so list/rm can find them. The host wrapper is Python 3 (stdlib only).
 
