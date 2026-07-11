@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""clankbox: run opencode inside a reusable podman container bound to the cwd."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+IMAGE = os.environ.get("CLANKBOX_IMAGE", "localhost/clankbox:latest")
+LABEL_KEY = "clankbox"
+LABEL_WORKDIR = "clankbox.workdir"
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+PASSTHROUGH_ENV = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "OPENCODE_API_KEY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+)
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"clankbox: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def need_podman() -> str:
+    path = shutil.which("podman")
+    if not path:
+        die("podman not found")
+    return path
+
+
+def run(
+    args: list[str],
+    *,
+    check: bool = True,
+    capture: bool = False,
+    quiet: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    kwargs: dict = {}
+    if capture:
+        kwargs["capture_output"] = True
+        kwargs["text"] = True
+    if quiet:
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
+    return subprocess.run(args, check=check, **kwargs)
+
+
+def workdir() -> Path:
+    return Path.cwd().resolve()
+
+
+def container_name(directory: Path) -> str:
+    digest = hashlib.sha256(str(directory).encode()).hexdigest()[:12]
+    return f"clankbox-{digest}"
+
+
+def image_exists() -> bool:
+    return run(["podman", "image", "exists", IMAGE], check=False).returncode == 0
+
+
+def container_state(name: str) -> str | None:
+    result = run(
+        ["podman", "inspect", "-f", "{{.State.Status}}", name],
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        return None
+    status = (result.stdout or "").strip()
+    return status or None
+
+
+def cmd_build() -> None:
+    need_podman()
+    run(
+        [
+            "podman",
+            "build",
+            "--pull=newer",
+            "-t",
+            IMAGE,
+            "-f",
+            str(SCRIPT_DIR / "Dockerfile"),
+            str(SCRIPT_DIR),
+        ]
+    )
+
+
+def ensure_image() -> None:
+    if not image_exists():
+        print(f"clankbox: building image {IMAGE} ...", file=sys.stderr)
+        cmd_build()
+
+
+def create_container(name: str, directory: Path) -> None:
+    home = Path.home()
+    args: list[str] = [
+        "podman",
+        "create",
+        "--name",
+        name,
+        "--replace",
+        "--label",
+        f"{LABEL_KEY}=1",
+        "--label",
+        f"{LABEL_WORKDIR}={directory}",
+        "--workdir",
+        "/workspace",
+        "--user",
+        "1000:1000",
+        "--userns",
+        "keep-id:uid=1000,gid=1000",
+        "--security-opt",
+        "label=disable",
+        "-v",
+        f"{directory}:/workspace:rw,Z",
+        "-e",
+        "HOME=/home/clank",
+        "-e",
+        f"TERM={os.environ.get('TERM', 'xterm-256color')}",
+    ]
+    if colorterm := os.environ.get("COLORTERM"):
+        args.extend(["-e", f"COLORTERM={colorterm}"])
+
+    gitconfig = home / ".gitconfig"
+    if gitconfig.is_file():
+        args.extend(["-v", f"{gitconfig}:/home/clank/.gitconfig:ro"])
+
+    ssh = home / ".ssh"
+    if ssh.is_dir():
+        args.extend(["-v", f"{ssh}:/home/clank/.ssh:ro"])
+
+    auth = home / ".local/share/opencode/auth.json"
+    if auth.is_file():
+        args.extend(
+            ["-v", f"{auth}:/home/clank/.local/share/opencode/auth.json:ro"]
+        )
+
+    config = home / ".config/opencode"
+    if config.is_dir():
+        args.extend(["-v", f"{config}:/home/clank/.config/opencode:ro"])
+
+    for key in PASSTHROUGH_ENV:
+        if value := os.environ.get(key):
+            args.extend(["-e", f"{key}={value}"])
+
+    args.extend([IMAGE, "sleep", "infinity"])
+    run(args, quiet=True)
+
+
+def ensure_container(name: str, directory: Path) -> None:
+    state = container_state(name)
+    if state is None:
+        print(f"clankbox: creating container {name} for {directory}", file=sys.stderr)
+        create_container(name, directory)
+        run(["podman", "start", name], quiet=True)
+        return
+    if state != "running":
+        print(f"clankbox: starting container {name}", file=sys.stderr)
+        run(["podman", "start", name], quiet=True)
+
+
+def exec_in(name: str, command: list[str]) -> None:
+    args = [
+        "podman",
+        "exec",
+        "-it",
+        "-w",
+        "/workspace",
+        "-e",
+        f"TERM={os.environ.get('TERM', 'xterm-256color')}",
+        name,
+        *command,
+    ]
+    os.execvp("podman", args)
+
+
+def cmd_list() -> None:
+    need_podman()
+    result = run(
+        [
+            "podman",
+            "ps",
+            "-a",
+            "--filter",
+            f"label={LABEL_KEY}=1",
+            "--format",
+            "{{.Names}}\t{{.Status}}",
+        ],
+        check=False,
+        capture=True,
+    )
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    if not lines:
+        print("No clankbox containers.")
+        return
+    print(f"{'NAMES':<24} {'STATUS':<28} WORKDIR")
+    for line in lines:
+        name, _, status = line.partition("\t")
+        work = ""
+        inspect = run(
+            [
+                "podman",
+                "inspect",
+                "-f",
+                f'{{{{index .Config.Labels "{LABEL_WORKDIR}"}}}}',
+                name,
+            ],
+            check=False,
+            capture=True,
+        )
+        if inspect.returncode == 0:
+            work = (inspect.stdout or "").strip()
+        print(f"{name:<24} {status:<28} {work}")
+
+
+def cmd_rm(args: list[str]) -> None:
+    need_podman()
+    all_flag = args and args[0] in ("--all", "-a")
+    if all_flag:
+        result = run(
+            ["podman", "ps", "-aq", "--filter", f"label={LABEL_KEY}=1"],
+            check=False,
+            capture=True,
+        )
+        ids = (result.stdout or "").split()
+        if not ids:
+            print("No clankbox containers to remove.")
+            return
+        run(["podman", "rm", "-f", *ids])
+        print("Removed all clankbox containers.")
+        return
+
+    directory = workdir()
+    name = container_name(directory)
+    if container_state(name) is None:
+        die(f"no container for {directory}")
+    run(["podman", "rm", "-f", name], quiet=True)
+    print(f"Removed {name} ({directory})")
+
+
+def cmd_stop(args: list[str]) -> None:
+    need_podman()
+    all_flag = args and args[0] in ("--all", "-a")
+    if all_flag:
+        result = run(
+            ["podman", "ps", "-q", "--filter", f"label={LABEL_KEY}=1"],
+            check=False,
+            capture=True,
+        )
+        ids = (result.stdout or "").split()
+        if not ids:
+            print("No running clankbox containers.")
+            return
+        run(["podman", "stop", *ids], quiet=True)
+        print("Stopped all running clankbox containers.")
+        return
+
+    directory = workdir()
+    name = container_name(directory)
+    state = container_state(name)
+    if state is None:
+        die(f"no container for {directory}")
+    if state == "running":
+        run(["podman", "stop", name], quiet=True)
+        print(f"Stopped {name}")
+    else:
+        print(f"{name} is not running")
+
+
+def cmd_shell(args: list[str]) -> None:
+    need_podman()
+    ensure_image()
+    directory = workdir()
+    name = container_name(directory)
+    ensure_container(name, directory)
+    if args and args[0] == "--":
+        args = args[1:]
+    if not args:
+        exec_in(name, ["bash", "-l"])
+    else:
+        exec_in(name, args)
+
+
+def cmd_enter(args: list[str]) -> None:
+    need_podman()
+    ensure_image()
+    directory = workdir()
+    name = container_name(directory)
+    ensure_container(name, directory)
+    if not args:
+        exec_in(name, ["opencode"])
+    else:
+        exec_in(name, ["opencode", *args])
+
+
+def cmd_help() -> None:
+    print(
+        """\
+clankbox - run opencode in a reusable podman container
+
+Usage:
+  clankbox [opencode-args...]   Start or attach; run opencode in this directory
+  clankbox shell [cmd...]       Shell into the container (default: bash)
+  clankbox list                 List all clankbox containers
+  clankbox stop [--all]         Stop container for this dir, or all
+  clankbox rm [--all]           Remove container for this dir, or all
+  clankbox build                Build/rebuild the image
+  clankbox help                 Show this help
+
+Behavior:
+  - Current directory is mounted at /workspace
+  - One container per absolute path (reused after exit)
+  - If the container is already running, a new exec session joins it
+  - Network is enabled; common CLI tools are preinstalled
+
+Environment:
+  CLANKBOX_IMAGE   Image name (default: localhost/clankbox:latest)"""
+    )
+
+
+def main(argv: list[str]) -> None:
+    cmd = argv[0] if argv else ""
+    rest = argv[1:]
+
+    if cmd in ("help", "-h", "--help"):
+        cmd_help()
+    elif cmd in ("list", "ls"):
+        cmd_list()
+    elif cmd in ("rm", "remove"):
+        cmd_rm(rest)
+    elif cmd == "stop":
+        cmd_stop(rest)
+    elif cmd in ("build", "rebuild"):
+        cmd_build()
+    elif cmd in ("shell", "sh", "bash"):
+        cmd_shell(rest)
+    elif cmd == "":
+        cmd_enter([])
+    else:
+        cmd_enter(argv)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(exc.returncode) from None
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
