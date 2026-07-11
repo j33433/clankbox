@@ -70,6 +70,19 @@ clankbox run "explain this repo"
 
 Containers are labeled `clankbox=1` so list/rm can find them. The host wrapper is Python 3 (stdlib only).
 
+## Concurrent terminals
+
+Clankbox uses advisory locks in `~/.local/state/clankbox/locks` (or
+`$XDG_STATE_HOME/clankbox/locks`) to serialize image builds and container
+lifecycle operations. Starting sessions from multiple terminals in the same
+workspace is safe: only one can create or start its shared container.
+
+The locks are released before `podman exec`, so sessions can run concurrently.
+They do not coordinate changes inside the shared workspace or container home;
+agents can still conflict when editing files, running Git commands, or changing
+dependencies. `stop` and `rm` remain destructive commands and can end active
+sessions by design.
+
 ## Image contents
 
 Debian bookworm slim plus: git, curl, wget, jq, ripgrep, python3, node/npm, make/g++, openssh-client, zip/unzip, sudo, and the opencode binary.

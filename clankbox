@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import os
 import shutil
@@ -77,6 +79,49 @@ def container_name(directory: Path) -> str:
     return f"clankbox-{digest}"
 
 
+def lock_directory() -> Path:
+    """Return a private, persistent location for process coordination locks."""
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+    directory = state_home / "clankbox" / "locks"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory.chmod(0o700)
+    return directory
+
+
+@contextmanager
+def lock(name: str, mode: int):
+    """Hold an advisory lock until the enclosing operation finishes."""
+    path = lock_directory() / name
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, mode)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+@contextmanager
+def image_lock():
+    """Serialize builds of the shared image."""
+    with lock("image.lock", fcntl.LOCK_EX):
+        yield
+
+
+@contextmanager
+def container_lock(directory: Path | None = None):
+    """Serialize lifecycle changes while allowing different workspaces to proceed."""
+    global_mode = fcntl.LOCK_EX if directory is None else fcntl.LOCK_SH
+    with lock("containers.lock", global_mode):
+        if directory is None:
+            yield
+            return
+        digest = hashlib.sha256(str(directory).encode()).hexdigest()[:12]
+        with lock(f"container-{digest}.lock", fcntl.LOCK_EX):
+            yield
+
+
 def image_exists() -> bool:
     return run(["podman", "image", "exists", IMAGE], check=False).returncode == 0
 
@@ -93,8 +138,7 @@ def container_state(name: str) -> str | None:
     return status or None
 
 
-def cmd_build() -> None:
-    need_podman()
+def build_image() -> None:
     info(f"building image {IMAGE} (this can take a few minutes)")
     run(
         [
@@ -110,10 +154,17 @@ def cmd_build() -> None:
     )
 
 
+def cmd_build() -> None:
+    need_podman()
+    with image_lock():
+        build_image()
+
+
 def ensure_image() -> None:
-    if not image_exists():
-        info(f"image {IMAGE} not found, building it first")
-        cmd_build()
+    with image_lock():
+        if not image_exists():
+            info(f"image {IMAGE} not found, building it first")
+            build_image()
 
 
 def create_container(name: str, directory: Path) -> None:
@@ -252,56 +303,60 @@ def cmd_rm(args: list[str]) -> None:
     need_podman()
     all_flag = args and args[0] in ("--all", "-a")
     if all_flag:
-        result = run(
-            ["podman", "ps", "-aq", "--filter", f"label={LABEL_KEY}=1"],
-            check=False,
-            capture=True,
-        )
-        ids = (result.stdout or "").split()
-        if not ids:
-            say("no clankbox containers to remove")
-            return
-        run(["podman", "rm", "-f", *ids], quiet=True)
-        say(f"removed all clankbox containers ({len(ids)})")
+        with container_lock():
+            result = run(
+                ["podman", "ps", "-aq", "--filter", f"label={LABEL_KEY}=1"],
+                check=False,
+                capture=True,
+            )
+            ids = (result.stdout or "").split()
+            if not ids:
+                say("no clankbox containers to remove")
+                return
+            run(["podman", "rm", "-f", *ids], quiet=True)
+            say(f"removed all clankbox containers ({len(ids)})")
         return
 
     directory = workdir()
     name = container_name(directory)
-    if container_state(name) is None:
-        die(f"no container for {directory}")
-    run(["podman", "rm", "-f", name], quiet=True)
-    say(f"removed {name} ({directory})")
+    with container_lock(directory):
+        if container_state(name) is None:
+            die(f"no container for {directory}")
+        run(["podman", "rm", "-f", name], quiet=True)
+        say(f"removed {name} ({directory})")
 
 
 def cmd_stop(args: list[str]) -> None:
     need_podman()
     all_flag = args and args[0] in ("--all", "-a")
     if all_flag:
-        result = run(
-            ["podman", "ps", "-q", "--filter", f"label={LABEL_KEY}=1"],
-            check=False,
-            capture=True,
-        )
-        ids = (result.stdout or "").split()
-        if not ids:
-            say("no running clankbox containers")
-            return
-        info(f"stopping {len(ids)} container(s)")
-        run(["podman", "stop", *ids], quiet=True)
-        say(f"stopped all running clankbox containers ({len(ids)})")
+        with container_lock():
+            result = run(
+                ["podman", "ps", "-q", "--filter", f"label={LABEL_KEY}=1"],
+                check=False,
+                capture=True,
+            )
+            ids = (result.stdout or "").split()
+            if not ids:
+                say("no running clankbox containers")
+                return
+            info(f"stopping {len(ids)} container(s)")
+            run(["podman", "stop", *ids], quiet=True)
+            say(f"stopped all running clankbox containers ({len(ids)})")
         return
 
     directory = workdir()
     name = container_name(directory)
-    state = container_state(name)
-    if state is None:
-        die(f"no container for {directory}")
-    if state == "running":
-        info(f"stopping {name}")
-        run(["podman", "stop", name], quiet=True)
-        say(f"stopped {name}")
-    else:
-        say(f"{name} is not running")
+    with container_lock(directory):
+        state = container_state(name)
+        if state is None:
+            die(f"no container for {directory}")
+        if state == "running":
+            info(f"stopping {name}")
+            run(["podman", "stop", name], quiet=True)
+            say(f"stopped {name}")
+        else:
+            say(f"{name} is not running")
 
 
 def cmd_shell(args: list[str]) -> None:
@@ -309,7 +364,8 @@ def cmd_shell(args: list[str]) -> None:
     ensure_image()
     directory = workdir()
     name = container_name(directory)
-    ensure_container(name, directory)
+    with container_lock(directory):
+        ensure_container(name, directory)
     if args and args[0] == "--":
         args = args[1:]
     if not args:
@@ -323,7 +379,8 @@ def cmd_enter(args: list[str]) -> None:
     ensure_image()
     directory = workdir()
     name = container_name(directory)
-    ensure_container(name, directory)
+    with container_lock(directory):
+        ensure_container(name, directory)
     if not args:
         exec_in(name, ["opencode"])
     else:
