@@ -34,6 +34,11 @@ def info(msg: str) -> None:
     print(f"clankbox: {msg}", file=sys.stderr, flush=True)
 
 
+def say(msg: str) -> None:
+    """Print a uniform result status line."""
+    print(f"clankbox: {msg}")
+
+
 def die(msg: str, code: int = 1) -> None:
     print(f"clankbox: {msg}", file=sys.stderr)
     raise SystemExit(code)
@@ -221,7 +226,7 @@ def cmd_list() -> None:
     )
     lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
     if not lines:
-        print("No clankbox containers.")
+        say("no clankbox containers")
         return
     print(f"{'NAMES':<24} {'STATUS':<28} WORKDIR")
     for line in lines:
@@ -254,10 +259,10 @@ def cmd_rm(args: list[str]) -> None:
         )
         ids = (result.stdout or "").split()
         if not ids:
-            print("No clankbox containers to remove.")
+            say("no clankbox containers to remove")
             return
-        run(["podman", "rm", "-f", *ids])
-        print("Removed all clankbox containers.")
+        run(["podman", "rm", "-f", *ids], quiet=True)
+        say(f"removed all clankbox containers ({len(ids)})")
         return
 
     directory = workdir()
@@ -265,7 +270,7 @@ def cmd_rm(args: list[str]) -> None:
     if container_state(name) is None:
         die(f"no container for {directory}")
     run(["podman", "rm", "-f", name], quiet=True)
-    print(f"Removed {name} ({directory})")
+    say(f"removed {name} ({directory})")
 
 
 def cmd_stop(args: list[str]) -> None:
@@ -279,11 +284,11 @@ def cmd_stop(args: list[str]) -> None:
         )
         ids = (result.stdout or "").split()
         if not ids:
-            print("No running clankbox containers.")
+            say("no running clankbox containers")
             return
         info(f"stopping {len(ids)} container(s)")
         run(["podman", "stop", *ids], quiet=True)
-        print("Stopped all running clankbox containers.")
+        say(f"stopped all running clankbox containers ({len(ids)})")
         return
 
     directory = workdir()
@@ -294,9 +299,9 @@ def cmd_stop(args: list[str]) -> None:
     if state == "running":
         info(f"stopping {name}")
         run(["podman", "stop", name], quiet=True)
-        print(f"Stopped {name}")
+        say(f"stopped {name}")
     else:
-        print(f"{name} is not running")
+        say(f"{name} is not running")
 
 
 def cmd_shell(args: list[str]) -> None:
