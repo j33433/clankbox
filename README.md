@@ -66,4 +66,6 @@ Containers are labeled `clankbox=1` so list/rm can find them. The host wrapper i
 
 ## Image contents
 
-Debian bookworm slim plus: git, curl, wget, jq, ripgrep, python3, node/npm, make/g++, openssh-client, zip/unzip, and the opencode binary.
+Debian bookworm slim plus: git, curl, wget, jq, ripgrep, python3, node/npm, make/g++, openssh-client, zip/unzip, sudo, and the opencode binary.
+
+The `clank` user has passwordless `sudo`, so the agent can install extra packages (e.g. `sudo apt install ...`). Under rootless podman this is isolated from host root. Packages persist in that directory's container until `clankbox rm`.

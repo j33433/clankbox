@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     patch \
     procps \
+    sudo \
     python3 \
     python3-pip \
     python3-venv \
@@ -46,8 +47,13 @@ RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-l
     && node --version && npm --version
 
 # UID 1000 is remapped to the host user via podman --userns keep-id:uid=1000,gid=1000
+# Passwordless sudo lets the agent install project packages inside the container;
+# rootless podman keeps this isolated from host root.
 RUN echo 'clank:x:1000:1000:clank:/home/clank:/bin/bash' >> /etc/passwd \
     && echo 'clank:x:1000:' >> /etc/group \
+    && echo 'clank:!:19000:0:99999:7:::' >> /etc/shadow \
+    && echo 'clank ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/clank \
+    && chmod 0440 /etc/sudoers.d/clank \
     && mkdir -p /home/clank/.local/share/opencode \
         /home/clank/.config/opencode \
         /workspace \
