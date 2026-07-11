@@ -3,6 +3,8 @@ FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/clank \
     PATH=/usr/local/bin:/usr/bin:/bin \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
     OPENCODE_DISABLE_AUTOUPDATE=1
 
 # Lean base tools (avoid Debian npm: it pulls webpack/eslint and balloons the image)

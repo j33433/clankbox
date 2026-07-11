@@ -131,6 +131,10 @@ def create_container(name: str, directory: Path) -> None:
         "HOME=/home/clank",
         "-e",
         f"TERM={os.environ.get('TERM', 'xterm-256color')}",
+        "-e",
+        f"LANG={os.environ.get('LANG', 'C.UTF-8')}",
+        "-e",
+        f"LC_ALL={os.environ.get('LC_ALL') or os.environ.get('LANG', 'C.UTF-8')}",
     ]
     if colorterm := os.environ.get("COLORTERM"):
         args.extend(["-e", f"COLORTERM={colorterm}"])
@@ -182,6 +186,10 @@ def exec_in(name: str, command: list[str]) -> None:
         "/workspace",
         "-e",
         f"TERM={os.environ.get('TERM', 'xterm-256color')}",
+        "-e",
+        f"LANG={os.environ.get('LANG', 'C.UTF-8')}",
+        "-e",
+        f"LC_ALL={os.environ.get('LC_ALL') or os.environ.get('LANG', 'C.UTF-8')}",
         name,
         *command,
     ]
