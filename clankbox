@@ -337,6 +337,7 @@ clankbox - run opencode in a reusable podman container
 
 Usage:
   clankbox [opencode-args...]   Start or attach; run opencode in this directory
+  clankbox continue [args...]   Resume and run opencode --continue
   clankbox shell [cmd...]       Shell into the container (default: bash)
   clankbox list                 List all clankbox containers
   clankbox stop [--all]         Stop container for this dir, or all
@@ -369,6 +370,8 @@ def main(argv: list[str]) -> None:
         cmd_stop(rest)
     elif cmd in ("build", "rebuild"):
         cmd_build()
+    elif cmd in ("continue", "cont"):
+        cmd_enter(["--continue", *rest])
     elif cmd in ("shell", "sh", "bash"):
         cmd_shell(rest)
     elif cmd == "":
