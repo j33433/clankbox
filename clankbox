@@ -29,6 +29,11 @@ def passthrough_env() -> list[str]:
     return sorted(names)
 
 
+def info(msg: str) -> None:
+    """Print a progress message for operations that may be slow."""
+    print(f"clankbox: {msg}", file=sys.stderr, flush=True)
+
+
 def die(msg: str, code: int = 1) -> None:
     print(f"clankbox: {msg}", file=sys.stderr)
     raise SystemExit(code)
@@ -85,6 +90,7 @@ def container_state(name: str) -> str | None:
 
 def cmd_build() -> None:
     need_podman()
+    info(f"building image {IMAGE} (this can take a few minutes)")
     run(
         [
             "podman",
@@ -101,7 +107,7 @@ def cmd_build() -> None:
 
 def ensure_image() -> None:
     if not image_exists():
-        print(f"clankbox: building image {IMAGE} ...", file=sys.stderr)
+        info(f"image {IMAGE} not found, building it first")
         cmd_build()
 
 
@@ -162,18 +168,20 @@ def create_container(name: str, directory: Path) -> None:
             args.extend(["-e", f"{key}={value}"])
 
     args.extend([IMAGE, "sleep", "infinity"])
+    info("creating container")
     run(args, quiet=True)
 
 
 def ensure_container(name: str, directory: Path) -> None:
     state = container_state(name)
     if state is None:
-        print(f"clankbox: creating container {name} for {directory}", file=sys.stderr)
+        info(f"no container for {directory}, setting one up")
         create_container(name, directory)
+        info("starting container")
         run(["podman", "start", name], quiet=True)
         return
     if state != "running":
-        print(f"clankbox: starting container {name}", file=sys.stderr)
+        info(f"starting container {name}")
         run(["podman", "start", name], quiet=True)
 
 
@@ -273,6 +281,7 @@ def cmd_stop(args: list[str]) -> None:
         if not ids:
             print("No running clankbox containers.")
             return
+        info(f"stopping {len(ids)} container(s)")
         run(["podman", "stop", *ids], quiet=True)
         print("Stopped all running clankbox containers.")
         return
@@ -283,6 +292,7 @@ def cmd_stop(args: list[str]) -> None:
     if state is None:
         die(f"no container for {directory}")
     if state == "running":
+        info(f"stopping {name}")
         run(["podman", "stop", name], quiet=True)
         print(f"Stopped {name}")
     else:
