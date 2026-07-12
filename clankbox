@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-IMAGE = os.environ.get("CLANKBOX_IMAGE", "localhost/clankbox:latest")
+IMAGE = "localhost/clankbox:latest"
 LABEL_KEY = "clankbox"
 LABEL_WORKDIR = "clankbox.workdir"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -393,22 +393,21 @@ def cmd_help() -> None:
 clankbox - run opencode in a reusable podman container
 
 Usage:
-  clankbox [opencode-args...]   Start or attach; run opencode in this directory
-  clankbox shell [cmd...]       Shell into the container (default: bash)
+  clankbox                      Start or attach; run opencode in this directory
+  clankbox opencode [args...]   Run opencode with arguments (alias: oc)
+  clankbox shell [-- cmd...]    Shell into the container (default: bash)
+                                use -- to pass flags
   clankbox list                 List all clankbox containers
-  clankbox stop [--all]         Stop container for this dir, or all
-  clankbox rm [--all]           Remove container for this dir, or all
-  clankbox build                Build/rebuild the image
-  clankbox help                 Show this help
+  clankbox stop [--all|-a]      Stop container for this dir, or all
+  clankbox rm [--all|-a]        Remove container for this dir, or all
+  clankbox build                Build or rebuild the image (alias: rebuild)
+  clankbox help                 Show this help (also: -h, --help)
 
 Behavior:
   - Current directory is mounted at /workspace
   - One container per absolute path (reused after exit)
   - If the container is already running, a new exec session joins it
-  - Network is enabled; common CLI tools are preinstalled
-
-Environment:
-  CLANKBOX_IMAGE   Image name (default: localhost/clankbox:latest)"""
+  - Network is enabled; common CLI tools are preinstalled"""
     )
 
 
@@ -418,20 +417,22 @@ def main(argv: list[str]) -> None:
 
     if cmd in ("help", "-h", "--help"):
         cmd_help()
-    elif cmd in ("list", "ls"):
+    elif cmd == "list":
         cmd_list()
-    elif cmd in ("rm", "remove"):
+    elif cmd == "rm":
         cmd_rm(rest)
     elif cmd == "stop":
         cmd_stop(rest)
     elif cmd in ("build", "rebuild"):
         cmd_build()
-    elif cmd in ("shell", "sh", "bash"):
+    elif cmd == "shell":
         cmd_shell(rest)
+    elif cmd in ("opencode", "oc"):
+        cmd_enter(rest)
     elif cmd == "":
         cmd_enter([])
     else:
-        cmd_enter(argv)
+        die(f"unknown command {cmd!r} (try 'clankbox help')")
 
 
 if __name__ == "__main__":

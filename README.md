@@ -23,6 +23,7 @@ First run builds the image automatically.
 ```bash
 cd /path/to/your/project
 clankbox                 # start opencode (creates/starts container if needed)
+clankbox oc              # same, explicitly (alias for 'opencode')
 ```
 
 From another terminal in the same project directory:
@@ -46,8 +47,8 @@ clankbox build           # rebuild the image
 Pass arguments through to opencode:
 
 ```bash
-clankbox --continue
-clankbox run "explain this repo"
+clankbox opencode --continue
+clankbox oc run "explain this repo"
 ```
 
 ## Design
