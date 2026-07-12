@@ -1,15 +1,6 @@
 # clankbox
 
-```
-  ▓▓▓▓▓▓▓▓▓▓▓▓▓
-  ▓           ▓   ░█▀▀░█░░░█▀█░█▀█░█░█
-  ▓ ╭─┴───┴─╮ ▓   ░█░░░█░░░█▀█░█░█░█▀▄
-  ▓ │ ▢  ▢ │ ▓   ░▀▀▀░▀▀▀░▀░▀░▀░▀░▀░▀
-  ▓ │ ╰───╯ │ ▓
-  ▓ ╰───┬───╯ ▓   ░█▀▄░█▀█░█░█
-  ▓    ╱ ╲    ▓   ░█▀▄░█░█░▄▀▄
-  ▓▓▓▓▓▓▓▓▓▓▓▓▓   ░▀▀░░▀▀▀░▀░▀
-```
+![clankbox logo](logo/logo.png)
 
 A container for safer vibecoding. Runs [opencode](https://opencode.ai) in a reusable podman container bound to your current directory.
 
