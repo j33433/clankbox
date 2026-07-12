@@ -17,6 +17,17 @@ LABEL_KEY = "clankbox"
 LABEL_WORKDIR = "clankbox.workdir"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+LOGO = """\
+  ▓▓▓▓▓▓▓▓▓▓▓▓▓
+  ▓           ▓   ░█▀▀░█░░░█▀█░█▀█░█░█
+  ▓ ╭─┴───┴─╮ ▓   ░█░░░█░░░█▀█░█░█░█▀▄
+  ▓ │ ▢   ▢ │ ▓   ░▀▀▀░▀▀▀░▀░▀░▀░▀░▀░▀
+  ▓ │ ╰───╯ │ ▓
+  ▓ ╰───┬───╯ ▓   ░█▀▄░█▀█░█░█
+  ▓    ╱ ╲    ▓   ░█▀▄░█░█░▄▀▄
+  ▓▓▓▓▓▓▓▓▓▓▓▓▓   ░▀▀░░▀▀▀░▀░▀
+"""
+
 # Extra env vars to forward in addition to any matching *_API_KEY.
 PASSTHROUGH_ENV = (
     "GITHUB_TOKEN",
@@ -39,6 +50,11 @@ def info(msg: str) -> None:
 def say(msg: str) -> None:
     """Print a uniform result status line."""
     print(f"clankbox: {msg}")
+
+
+def print_logo() -> None:
+    """Print the clankbox logo to stderr."""
+    print(LOGO, file=sys.stderr)
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -379,6 +395,7 @@ def cmd_enter(args: list[str]) -> None:
     ensure_image()
     directory = workdir()
     name = container_name(directory)
+    print_logo()
     with container_lock(directory):
         ensure_container(name, directory)
     if not args:
@@ -388,6 +405,7 @@ def cmd_enter(args: list[str]) -> None:
 
 
 def cmd_help() -> None:
+    print_logo()
     print(
         """\
 clankbox - run opencode in a reusable podman container
