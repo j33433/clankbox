@@ -371,7 +371,7 @@ def cmd_shell(args: list[str]) -> None:
     if not args:
         exec_in(name, ["bash", "-l"])
     else:
-        exec_in(name, args)
+        exec_in(name, ["bash", "-lc", 'exec "$@"', "bash", *args])
 
 
 def cmd_enter(args: list[str]) -> None:
@@ -382,9 +382,9 @@ def cmd_enter(args: list[str]) -> None:
     with container_lock(directory):
         ensure_container(name, directory)
     if not args:
-        exec_in(name, ["opencode"])
+        exec_in(name, ["bash", "-lc", "exec opencode"])
     else:
-        exec_in(name, ["opencode", *args])
+        exec_in(name, ["bash", "-lc", 'exec opencode "$@"', "bash", *args])
 
 
 def cmd_help() -> None:
