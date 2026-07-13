@@ -4,11 +4,42 @@
 
 A container for safer vibecoding. Runs [opencode](https://opencode.ai) in a reusable podman container bound to your current directory.
 
+## Why run opencode in a container?
+
+An autonomous agent runs shell commands and edits files with your real credentials. A container bounds the blast radius:
+
+- **Agents ignore instructions.** Even frontier models disregard project and agent rules, for example creating temp files insecurely or running commands you didn't expect. A sandbox is a backstop, not a substitute for trusting the agent to behave.
+- **Filesystem scope.** The agent sees only the bind-mounted workspace, not your whole home directory or other projects.
+- **Credential exposure is bounded.** Host auth (`~/.ssh`, `~/.gitconfig`, opencode auth/config) is mounted read-only, and only `*_API_KEY`, `GITHUB_TOKEN`, and `GH_TOKEN` are forwarded. The agent cannot read arbitrary host secrets.
+- **`sudo` without host risk.** Passwordless sudo inside the container maps to your unprivileged host user under rootless podman, not real root.
+- **Reversible.** Throw away a bad state with `clankbox rm`; the image is shared and rebuildable.
+
 ## Requirements
 
 - Python 3.10+
 - [podman](https://podman.io/)
 - network access to build the image and for tools inside the container
+
+## Platforms
+
+Runs on Linux hosts, including Linux guests such as VMs and WSL2 distros (e.g. Ubuntu). On WSL2 or a VM, keep your project on the Linux filesystem (`~/...`) rather than a Windows mount (`/mnt/c/...`) for correct permissions and performance.
+
+## Setting up podman
+
+Install the distro package:
+
+```bash
+sudo apt install podman     # Debian / Ubuntu / WSL
+sudo dnf install podman     # Fedora
+```
+
+Most packages configure rootless mode (subuid/subgid) automatically, so no extra setup is usually needed. Check it works:
+
+```bash
+podman run --rm hello-world
+```
+
+For other distros see [podman.io](https://podman.io/).
 
 ## Install
 
