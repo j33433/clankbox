@@ -75,6 +75,8 @@ clankbox stop --all
 clankbox rm              # remove this directory's container
 clankbox rm --all        # remove every clankbox container
 clankbox build           # rebuild the image
+clankbox update          # update apt packages, Node.js, and opencode
+clankbox update --all    # update all clankbox containers
 ```
 
 Pass arguments through to opencode:
