@@ -404,6 +404,91 @@ def cmd_enter(args: list[str]) -> None:
         exec_in(name, ["bash", "-lc", 'exec opencode "$@"', "bash", *args])
 
 
+UPDATE_SCRIPT = r"""set -e
+
+echo "clankbox: updating Debian packages"
+sudo apt-get update
+sudo apt-get upgrade -y
+sudo apt-get autoremove -y
+sudo apt-get clean
+sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+echo "clankbox: checking Node.js"
+CURRENT=$(node --version 2>/dev/null || echo "none")
+# Newest Active/Maintenance LTS release (.lts is false for non-LTS, else a codename).
+LATEST=$(curl -fsSL https://nodejs.org/dist/index.json \
+    | jq -r '[.[] | select(.lts != false)][0].version')
+if [ "$CURRENT" != "$LATEST" ]; then
+    echo "clankbox: updating Node.js $CURRENT -> $LATEST"
+    curl -fsSL "https://nodejs.org/dist/${LATEST}/node-${LATEST}-linux-x64.tar.xz" \
+        | sudo tar -xJ -C /usr/local --strip-components=1
+    sudo rm -rf /root/.npm /tmp/npm-* || true
+else
+    echo "clankbox: Node.js already at latest ($CURRENT)"
+fi
+node --version && npm --version
+
+echo "clankbox: updating opencode"
+CURRENT_OC=$(opencode --version 2>/dev/null || echo "none")
+curl -fsSL https://opencode.ai/install | bash || true
+if [ -x /home/clank/.opencode/bin/opencode ]; then
+    sudo install -m 0755 /home/clank/.opencode/bin/opencode /usr/local/bin/opencode
+    rm -rf /home/clank/.opencode
+    echo "clankbox: opencode updated ($CURRENT_OC -> $(opencode --version))"
+else
+    echo "clankbox: opencode already at latest ($CURRENT_OC)"
+fi
+
+# pip is the Debian python3-pip package, so apt-get upgrade above keeps it
+# current. Upgrading it separately from PyPI would fight PEP 668 / apt.
+
+echo "clankbox: update complete"
+"""
+
+
+def cmd_update(args: list[str]) -> None:
+    need_podman()
+    ensure_image()
+    all_flag = args and args[0] in ("--all", "-a")
+
+    if all_flag:
+        with container_lock():
+            result = run(
+                ["podman", "ps", "-aq", "--filter", f"label={LABEL_KEY}=1"],
+                check=False,
+                capture=True,
+            )
+            names = (result.stdout or "").split()
+            if not names:
+                say("no clankbox containers to update")
+                return
+            for name in names:
+                state = container_state(name)
+                if state != "running":
+                    info(f"starting {name}")
+                    run(["podman", "start", name], quiet=True)
+                info(f"updating {name}")
+                rc = run(
+                    [
+                        "podman", "exec", "-t", "-w", "/workspace",
+                        name, "bash", "-lc", UPDATE_SCRIPT,
+                    ],
+                    check=False,
+                ).returncode
+                if rc == 0:
+                    say(f"updated {name}")
+                else:
+                    say(f"failed to update {name}")
+            return
+
+    directory = workdir()
+    name = container_name(directory)
+    with container_lock(directory):
+        ensure_container(name, directory)
+    info(f"updating {name}")
+    exec_in(name, ["bash", "-lc", UPDATE_SCRIPT])
+
+
 def cmd_help() -> None:
     print_logo()
     print(
@@ -419,6 +504,8 @@ Usage:
   clankbox stop [--all|-a]      Stop container for this dir, or all
   clankbox rm [--all|-a]        Remove container for this dir, or all
   clankbox build                Build or rebuild the image (alias: rebuild)
+  clankbox update [--all|-a]    Update apt packages, Node.js, and opencode in
+                                this container, or all containers
   clankbox help                 Show this help (also: -h, --help)
 
 Behavior:
@@ -443,6 +530,8 @@ def main(argv: list[str]) -> None:
         cmd_stop(rest)
     elif cmd in ("build", "rebuild"):
         cmd_build()
+    elif cmd == "update":
+        cmd_update(rest)
     elif cmd == "shell":
         cmd_shell(rest)
     elif cmd in ("opencode", "oc"):

@@ -39,7 +39,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 # Official Node binary (includes npm/npx, much smaller than Debian npm)
-ARG NODE_VERSION=22.17.0
+# Pin to the latest Active LTS (Node recommends LTS-only for production use).
+ARG NODE_VERSION=24.18.0
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
     | tar -xJ -C /usr/local --strip-components=1 \
     && npm cache clean --force \
