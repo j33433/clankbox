@@ -115,6 +115,8 @@ sessions by design.
 
 ## Image contents
 
-Debian bookworm slim plus: git, curl, wget, jq, ripgrep, python3, node/npm, make/g++, openssh-client, zip/unzip, sudo, and the opencode binary.
+Debian bookworm slim plus: git, curl, wget, jq, ripgrep, python3, make/g++, openssh-client, zip/unzip, sudo.
+
+Node.js and opencode are not baked into the image. Each container provisions them on first run (the current LTS Node and latest opencode), so a fresh container is always current without rebuilding the image. The same code path backs `clankbox update`. Because of this, the first run in a new directory takes a little longer while it downloads them; later runs reuse the container and start instantly.
 
 The `clank` user has passwordless `sudo`, so the agent can install extra packages (e.g. `sudo apt install ...`). Under rootless podman this is isolated from host root. Packages persist in that directory's container until `clankbox rm`.

@@ -7,7 +7,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 \
     OPENCODE_DISABLE_AUTOUPDATE=1
 
-# Lean base tools (avoid Debian npm: it pulls webpack/eslint and balloons the image)
+# Lean base tools. Node/npm are intentionally not from Debian (it pulls
+# webpack/eslint and balloons the image); clankbox provisions the official
+# Node binary into each container instead.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
@@ -38,14 +40,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# Official Node binary (includes npm/npx, much smaller than Debian npm)
-# Pin to the latest Active LTS (Node recommends LTS-only for production use).
-ARG NODE_VERSION=24.18.0
-RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
-    | tar -xJ -C /usr/local --strip-components=1 \
-    && npm cache clean --force \
-    && rm -rf /tmp/* /root/.npm \
-    && node --version && npm --version
+# Node.js and opencode are not baked into the image. They are provisioned into
+# each container on first run by clankbox (the same code path as 'clankbox
+# update'), so a fresh container always gets the current LTS Node and the
+# latest opencode without rebuilding the image.
 
 # UID 1000 is remapped to the host user via podman --userns keep-id:uid=1000,gid=1000
 # Passwordless sudo lets the agent install project packages inside the container;
@@ -59,18 +57,6 @@ RUN echo 'clank:x:1000:1000:clank:/home/clank:/bin/bash' >> /etc/passwd \
         /home/clank/.config/opencode \
         /workspace \
     && chown -R 1000:1000 /home/clank /workspace
-
-# Standalone opencode binary
-USER clank
-WORKDIR /home/clank
-RUN curl -fsSL https://opencode.ai/install | bash \
-    && test -x /home/clank/.opencode/bin/opencode \
-    && /home/clank/.opencode/bin/opencode --version
-
-USER root
-RUN install -m 0755 /home/clank/.opencode/bin/opencode /usr/local/bin/opencode \
-    && rm -rf /home/clank/.opencode \
-    && chown -R 1000:1000 /home/clank
 
 WORKDIR /workspace
 USER clank

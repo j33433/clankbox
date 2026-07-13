@@ -240,17 +240,46 @@ def create_container(name: str, directory: Path) -> None:
     run(args, quiet=True)
 
 
-def ensure_container(name: str, directory: Path) -> None:
+def is_provisioned(name: str) -> bool:
+    """True if the container has completed provisioning (Node, opencode)."""
+    return (
+        run(
+            ["podman", "exec", name, "test", "-f", PROVISION_MARKER],
+            check=False,
+            quiet=True,
+        ).returncode
+        == 0
+    )
+
+
+def provision(name: str) -> None:
+    """Install/update in-container software. Raises if provisioning fails."""
+    info("provisioning tools (first run, this can take a minute)")
+    run(
+        [
+            "podman", "exec", "-t", "-w", "/workspace",
+            name, "bash", "-lc", PROVISION_SCRIPT,
+        ]
+    )
+
+
+def ensure_container(name: str, directory: Path) -> bool:
+    """Ensure a running container and return whether it was provisioned."""
     state = container_state(name)
     if state is None:
         info(f"no container for {directory}, setting one up")
         create_container(name, directory)
         info("starting container")
         run(["podman", "start", name], quiet=True)
-        return
+        provision(name)
+        return True
     if state != "running":
         info(f"starting container {name}")
         run(["podman", "start", name], quiet=True)
+    if not is_provisioned(name):
+        provision(name)
+        return True
+    return False
 
 
 def exec_in(name: str, command: list[str]) -> None:
@@ -400,7 +429,14 @@ def cmd_enter(args: list[str]) -> None:
         exec_in(name, ["bash", "-lc", 'exec opencode "$@"', "bash", *args])
 
 
-UPDATE_SCRIPT = r"""set -e
+PROVISION_MARKER = "/home/clank/.clankbox-provisioned"
+
+# Installs/updates the software that is not baked into the image (Node.js,
+# opencode) and refreshes apt packages. Used both to provision a fresh
+# container and to update an existing one, so first run and 'clankbox update'
+# share a single source of truth. Keep the marker path in sync with
+# PROVISION_MARKER above.
+PROVISION_SCRIPT = r"""set -e
 
 echo "clankbox: updating Debian packages"
 sudo apt-get update
@@ -426,7 +462,7 @@ node --version && npm --version
 
 echo "clankbox: updating opencode"
 CURRENT_OC=$(opencode --version 2>/dev/null || echo "none")
-curl -fsSL https://opencode.ai/install | bash || true
+curl -fsSL https://opencode.ai/install | bash
 if [ -x /home/clank/.opencode/bin/opencode ]; then
     sudo install -m 0755 /home/clank/.opencode/bin/opencode /usr/local/bin/opencode
     rm -rf /home/clank/.opencode
@@ -438,7 +474,8 @@ fi
 # pip is the Debian python3-pip package, so apt-get upgrade above keeps it
 # current. Upgrading it separately from PyPI would fight PEP 668 / apt.
 
-echo "clankbox: update complete"
+touch /home/clank/.clankbox-provisioned
+echo "clankbox: done"
 """
 
 
@@ -467,7 +504,7 @@ def cmd_update(args: list[str]) -> None:
                 rc = run(
                     [
                         "podman", "exec", "-t", "-w", "/workspace",
-                        name, "bash", "-lc", UPDATE_SCRIPT,
+                        name, "bash", "-lc", PROVISION_SCRIPT,
                     ],
                     check=False,
                 ).returncode
@@ -480,9 +517,12 @@ def cmd_update(args: list[str]) -> None:
     directory = workdir()
     name = container_name(directory)
     with container_lock(directory):
-        ensure_container(name, directory)
+        provisioned = ensure_container(name, directory)
+    if provisioned:
+        say(f"updated {name}")
+        return
     info(f"updating {name}")
-    exec_in(name, ["bash", "-lc", UPDATE_SCRIPT])
+    exec_in(name, ["bash", "-lc", PROVISION_SCRIPT])
 
 
 def cmd_help() -> None:
