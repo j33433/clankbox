@@ -221,10 +221,6 @@ def create_container(name: str, directory: Path) -> None:
     if gitconfig.is_file():
         args.extend(["-v", f"{gitconfig}:/home/clank/.gitconfig:ro"])
 
-    ssh = home / ".ssh"
-    if ssh.is_dir():
-        args.extend(["-v", f"{ssh}:/home/clank/.ssh:ro"])
-
     auth = home / ".local/share/opencode/auth.json"
     if auth.is_file():
         args.extend(
