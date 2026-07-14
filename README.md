@@ -10,7 +10,7 @@ An autonomous agent runs shell commands and edits files with your real credentia
 
 - **Agents ignore instructions.** Even frontier models disregard project and agent rules, for example creating temp files insecurely or running commands you didn't expect. A sandbox is a backstop, not a substitute for trusting the agent to behave.
 - **Filesystem scope.** The agent sees only the bind-mounted workspace, not your whole home directory or other projects.
-- **Credential exposure is bounded.** Host auth (`~/.gitconfig`, opencode auth/config) is mounted read-only, and only `*_API_KEY`, `GITHUB_TOKEN`, and `GH_TOKEN` are forwarded. Private SSH keys are intentionally not mounted, so the agent cannot read arbitrary host secrets. Run git commands that need credentials (for example push/pull over SSH) on the host; `GITHUB_TOKEN`/`GH_TOKEN` still cover HTTPS git auth inside the container.
+- **Credential exposure is bounded.** Host auth (`~/.gitconfig`, opencode auth/config) is mounted read-only, and only `*_API_KEY`, `GITHUB_TOKEN`, and `GH_TOKEN` are forwarded at exec time (not stored in the container config). Private SSH keys are intentionally not mounted, so the agent cannot read arbitrary host secrets. Run git commands that need credentials (for example push/pull over SSH) on the host; `GITHUB_TOKEN`/`GH_TOKEN` still cover HTTPS git auth inside the container.
 - **`sudo` without host risk.** Passwordless sudo inside the container maps to your unprivileged host user under rootless podman, not real root.
 - **Reversible.** Throw away a bad state with `clankbox rm`; the image is shared and rebuildable.
 - **Workspace writes are a host escape vector.** The agent can create or modify files in the bind-mounted workspace that later execute on the host outside the sandbox, for example `Makefile`, `.envrc`, `package.json` scripts, and `.github/workflows/*`. Git hooks are protected: `.git/hooks` is mounted read-only (or replaced with a tmpfs if it does not exist yet), so the agent cannot install hooks that fire on your next host-side `git commit` or `git checkout`. Other dangerous files are not protected because the agent needs to edit them as part of normal development. Review changes before running them on the host.
@@ -98,7 +98,7 @@ clankbox oc run "explain this repo"
 | Network | Default podman networking (on) |
 | Disk | Shared slim image; no named volumes; `rm` drops container layer |
 | Host auth | Mounts `~/.local/share/opencode/auth.json`, `~/.config/opencode`, `~/.gitconfig` (read-only) when present |
-| API keys | Forwards every `*_API_KEY` env var, plus `GITHUB_TOKEN` / `GH_TOKEN`, if set |
+| API keys | Forwards every `*_API_KEY` env var, plus `GITHUB_TOKEN` / `GH_TOKEN`, at exec time (not stored in container config) |
 
 Containers are labeled `clankbox=1` so list/rm can find them. The host wrapper is Python 3 (stdlib only).
 
