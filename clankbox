@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 IMAGE = "localhost/clankbox:latest"
 LABEL_KEY = "clankbox"
@@ -57,7 +58,7 @@ def print_logo() -> None:
     print(LOGO, file=sys.stderr)
 
 
-def die(msg: str, code: int = 1) -> None:
+def die(msg: str, code: int = 1) -> NoReturn:
     print(f"clankbox: {msg}", file=sys.stderr)
     raise SystemExit(code)
 
@@ -487,7 +488,7 @@ if [ "$CURRENT" != "$LATEST" ]; then
         *) echo "clankbox: unsupported architecture $ARCH for Node.js"; exit 1 ;;
     esac
     curl -fsSL "https://nodejs.org/dist/${LATEST}/node-${LATEST}-linux-${NODE_ARCH}.tar.xz" \
-        | sudo tar -xJ -C /usr/local --strip-components=1
+        | sudo tar -xJ -C /usr/local --strip-components=1 --exclude='LICENSE' --exclude='README.md'
     sudo rm -rf /root/.npm /tmp/npm-* || true
 else
     echo "clankbox: Node.js already at latest ($CURRENT)"
