@@ -103,6 +103,8 @@ clankbox oc run "explain this repo"
 
 Containers are labeled `clankbox=1` so list/rm can find them. The host wrapper is Python 3 (stdlib only).
 
+If you rename or move a project directory, its container name (a path hash) changes, so the old container lingers invisibly. Use `clankbox list` to find and `clankbox rm` to clean it up.
+
 ## Concurrent terminals
 
 Clankbox uses advisory locks in `~/.local/state/clankbox/locks` (or
