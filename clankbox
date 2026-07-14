@@ -217,6 +217,15 @@ def create_container(name: str, directory: Path) -> None:
     if colorterm := os.environ.get("COLORTERM"):
         args.extend(["-e", f"COLORTERM={colorterm}"])
 
+    git_hooks = directory / ".git" / "hooks"
+    git_dir = directory / ".git"
+    if git_hooks.is_dir():
+        args.extend(["-v", f"{git_hooks}:/workspace/.git/hooks:ro"])
+    elif git_dir.is_dir():
+        args.extend(
+            ["--mount", "type=tmpfs,destination=/workspace/.git/hooks"]
+        )
+
     gitconfig = home / ".gitconfig"
     if gitconfig.is_file():
         args.extend(["-v", f"{gitconfig}:/home/clank/.gitconfig:ro"])
