@@ -91,6 +91,24 @@ def workdir() -> Path:
     return Path.cwd().resolve()
 
 
+def guard_workspace(directory: Path) -> None:
+    """Refuse to sandbox directories that would expose the host broadly."""
+    home = Path.home().resolve()
+    if directory == Path("/"):
+        die("refusing to run in filesystem root")
+    if directory == home:
+        die(f"refusing to run in home directory ({home}); cd into a project first")
+    try:
+        home.relative_to(directory)
+    except ValueError:
+        pass
+    else:
+        die(
+            f"refusing to run in {directory}, which contains your home directory "
+            f"({home}); cd into a project first"
+        )
+
+
 def container_name(directory: Path) -> str:
     digest = hashlib.sha256(str(directory).encode()).hexdigest()[:12]
     return f"clankbox-{digest}"
@@ -155,7 +173,7 @@ def container_state(name: str) -> str | None:
     return status or None
 
 
-def build_image(extra_args: list[str]) -> None:
+def build_image(extra_args: list[str] | None = None) -> None:
     info(f"building image {IMAGE} (this can take a few minutes)")
     run(
         [
@@ -167,7 +185,7 @@ def build_image(extra_args: list[str]) -> None:
             "-f",
             str(SCRIPT_DIR / "Dockerfile"),
             str(SCRIPT_DIR),
-            *extra_args,
+            *(extra_args or []),
         ]
     )
 
@@ -186,6 +204,7 @@ def ensure_image() -> None:
 
 
 def create_container(name: str, directory: Path) -> None:
+    guard_workspace(directory)
     home = Path.home()
     args: list[str] = [
         "podman",
@@ -223,28 +242,31 @@ def create_container(name: str, directory: Path) -> None:
     if colorterm := os.environ.get("COLORTERM"):
         args.extend(["-e", f"COLORTERM={colorterm}"])
 
-    git_hooks = directory / ".git" / "hooks"
     git_dir = directory / ".git"
+    git_hooks = git_dir / "hooks"
+    git_config = git_dir / "config"
     if git_hooks.is_dir():
         args.extend(["-v", f"{git_hooks}:/workspace/.git/hooks:ro,Z"])
     elif git_dir.is_dir():
         args.extend(
             ["--mount", "type=tmpfs,destination=/workspace/.git/hooks"]
         )
+    if git_config.is_file():
+        args.extend(["-v", f"{git_config}:/workspace/.git/config:ro,Z"])
 
     gitconfig = home / ".gitconfig"
     if gitconfig.is_file():
-        args.extend(["-v", f"{gitconfig}:/home/clank/.gitconfig:ro,Z"])
+        args.extend(["-v", f"{gitconfig}:/home/clank/.gitconfig:ro,z"])
 
     auth = home / ".local/share/opencode/auth.json"
     if auth.is_file():
         args.extend(
-            ["-v", f"{auth}:/tmp/clankbox-auth.json:ro,Z"]
+            ["-v", f"{auth}:/tmp/clankbox-auth.json:ro,z"]
         )
 
     config = home / ".config/opencode"
     if config.is_dir():
-        args.extend(["-v", f"{config}:/home/clank/.config/opencode:ro,Z"])
+        args.extend(["-v", f"{config}:/home/clank/.config/opencode:ro,z"])
 
     args.extend([IMAGE, "sleep", "infinity"])
     info("creating container")
@@ -325,8 +347,8 @@ def exec_in(name: str, command: list[str]) -> None:
         f"LC_ALL={os.environ.get('LC_ALL') or os.environ.get('LANG', 'C.UTF-8')}",
     ]
     for key in passthrough_env():
-        if value := os.environ.get(key):
-            args.extend(["-e", f"{key}={value}"])
+        if os.environ.get(key):
+            args.extend(["-e", key])
     args.extend([name, *command])
     os.execvp("podman", args)
 
@@ -488,8 +510,17 @@ if [ "$CURRENT" != "$LATEST" ]; then
         aarch64|arm64) NODE_ARCH=arm64 ;;
         *) echo "clankbox: unsupported architecture $ARCH for Node.js"; exit 1 ;;
     esac
-    curl -fsSL "https://nodejs.org/dist/${LATEST}/node-${LATEST}-linux-${NODE_ARCH}.tar.xz" \
-        | sudo tar -xJ -C /usr/local --strip-components=1 --exclude='LICENSE' --exclude='README.md'
+    NODE_TARBALL="node-${LATEST}-linux-${NODE_ARCH}.tar.xz"
+    TMPDIR=$(mktemp -d)
+    curl -fsSL -o "$TMPDIR/$NODE_TARBALL" \
+        "https://nodejs.org/dist/${LATEST}/${NODE_TARBALL}"
+    curl -fsSL -o "$TMPDIR/SHASUMS256.txt" \
+        "https://nodejs.org/dist/${LATEST}/SHASUMS256.txt"
+    grep " ${NODE_TARBALL}\$" "$TMPDIR/SHASUMS256.txt" > "$TMPDIR/CHECKSUM"
+    ( cd "$TMPDIR" && sha256sum -c CHECKSUM )
+    sudo tar -xJ -C /usr/local --strip-components=1 \
+        --exclude='LICENSE' --exclude='README.md' "$TMPDIR/$NODE_TARBALL"
+    rm -rf "$TMPDIR"
     sudo rm -rf /root/.npm /tmp/npm-* || true
 else
     echo "clankbox: Node.js already at latest ($CURRENT)"
