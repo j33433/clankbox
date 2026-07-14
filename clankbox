@@ -107,6 +107,11 @@ def guard_workspace(directory: Path) -> None:
             f"refusing to run in {directory}, which contains your home directory "
             f"({home}); cd into a project first"
         )
+    if ":" in str(directory):
+        die(
+            f"refusing to run in {directory}: path contains ':' "
+            f"which breaks container mount syntax"
+        )
 
 
 def container_name(directory: Path) -> str:
@@ -206,6 +211,10 @@ def ensure_image() -> None:
 def create_container(name: str, directory: Path) -> None:
     guard_workspace(directory)
     home = Path.home()
+    if ":" in str(home):
+        die(
+            f"cannot mount host files: home path contains ':' ({home})"
+        )
     args: list[str] = [
         "podman",
         "create",
@@ -243,16 +252,40 @@ def create_container(name: str, directory: Path) -> None:
         args.extend(["-e", f"COLORTERM={colorterm}"])
 
     git_dir = directory / ".git"
-    git_hooks = git_dir / "hooks"
-    git_config = git_dir / "config"
-    if git_hooks.is_dir():
-        args.extend(["-v", f"{git_hooks}:/workspace/.git/hooks:ro,Z"])
-    elif git_dir.is_dir():
+    if not git_dir.exists():
         args.extend(
-            ["--mount", "type=tmpfs,destination=/workspace/.git/hooks"]
+            ["--mount", "type=tmpfs,destination=/workspace/.git"]
         )
-    if git_config.is_file():
-        args.extend(["-v", f"{git_config}:/workspace/.git/config:ro,Z"])
+    elif git_dir.is_file():
+        args.extend(["-v", f"{git_dir}:/workspace/.git:ro,Z"])
+    else:
+        git_hooks = git_dir / "hooks"
+        git_config = git_dir / "config"
+        if git_hooks.is_dir():
+            args.extend(["-v", f"{git_hooks}:/workspace/.git/hooks:ro,Z"])
+        else:
+            args.extend(
+                ["--mount", "type=tmpfs,destination=/workspace/.git/hooks"]
+            )
+        if git_config.is_file():
+            args.extend(["-v", f"{git_config}:/workspace/.git/config:ro,Z"])
+        git_modules = git_dir / "modules"
+        if git_modules.is_dir():
+            for sub in sorted(git_modules.iterdir()):
+                if not sub.is_dir():
+                    continue
+                sub_hooks = sub / "hooks"
+                sub_config = sub / "config"
+                rel = f"/workspace/.git/modules/{sub.name}"
+                if sub_hooks.is_dir():
+                    args.extend(["-v", f"{sub_hooks}:{rel}/hooks:ro,Z"])
+                if sub_config.is_file():
+                    args.extend(["-v", f"{sub_config}:{rel}/config:ro,Z"])
+        info_attrs = git_dir / "info" / "attributes"
+        if info_attrs.is_file():
+            args.extend(
+                ["-v", f"{info_attrs}:/workspace/.git/info/attributes:ro,Z"]
+            )
 
     gitconfig = home / ".gitconfig"
     if gitconfig.is_file():
