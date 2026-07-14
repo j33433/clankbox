@@ -201,8 +201,6 @@ def create_container(name: str, directory: Path) -> None:
         "1000:1000",
         "--userns",
         "keep-id:uid=1000,gid=1000",
-        "--security-opt",
-        "label=disable",
         "-v",
         f"{directory}:/workspace:rw,Z",
         "-e",
@@ -220,7 +218,7 @@ def create_container(name: str, directory: Path) -> None:
     git_hooks = directory / ".git" / "hooks"
     git_dir = directory / ".git"
     if git_hooks.is_dir():
-        args.extend(["-v", f"{git_hooks}:/workspace/.git/hooks:ro"])
+        args.extend(["-v", f"{git_hooks}:/workspace/.git/hooks:ro,Z"])
     elif git_dir.is_dir():
         args.extend(
             ["--mount", "type=tmpfs,destination=/workspace/.git/hooks"]
@@ -228,17 +226,17 @@ def create_container(name: str, directory: Path) -> None:
 
     gitconfig = home / ".gitconfig"
     if gitconfig.is_file():
-        args.extend(["-v", f"{gitconfig}:/home/clank/.gitconfig:ro"])
+        args.extend(["-v", f"{gitconfig}:/home/clank/.gitconfig:ro,Z"])
 
     auth = home / ".local/share/opencode/auth.json"
     if auth.is_file():
         args.extend(
-            ["-v", f"{auth}:/tmp/clankbox-auth.json:ro"]
+            ["-v", f"{auth}:/tmp/clankbox-auth.json:ro,Z"]
         )
 
     config = home / ".config/opencode"
     if config.is_dir():
-        args.extend(["-v", f"{config}:/home/clank/.config/opencode:ro"])
+        args.extend(["-v", f"{config}:/home/clank/.config/opencode:ro,Z"])
 
     args.extend([IMAGE, "sleep", "infinity"])
     info("creating container")
