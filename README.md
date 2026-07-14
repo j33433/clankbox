@@ -99,6 +99,7 @@ clankbox oc run "explain this repo"
 | Disk | Shared slim image; no named volumes; `rm` drops container layer |
 | Host auth | Mounts `~/.local/share/opencode/auth.json`, `~/.config/opencode`, `~/.gitconfig` (read-only) when present |
 | API keys | Forwards every `*_API_KEY` env var, plus `GITHUB_TOKEN` / `GH_TOKEN`, at exec time (not stored in container config) |
+| Resource limits | 512 PIDs, 4g memory (override via `CLANKBOX_PIDS` / `CLANKBOX_MEMORY`) |
 
 Containers are labeled `clankbox=1` so list/rm can find them. The host wrapper is Python 3 (stdlib only).
 
