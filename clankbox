@@ -224,7 +224,7 @@ def create_container(name: str, directory: Path) -> None:
     auth = home / ".local/share/opencode/auth.json"
     if auth.is_file():
         args.extend(
-            ["-v", f"{auth}:/home/clank/.local/share/opencode/auth.json:ro"]
+            ["-v", f"{auth}:/tmp/clankbox-auth.json:ro"]
         )
 
     config = home / ".config/opencode"
@@ -263,6 +263,21 @@ def provision(name: str) -> None:
     )
 
 
+def copy_auth_if_present(name: str) -> None:
+    """Copy staged auth.json to the writable location if the host file was mounted."""
+    result = run(
+        ["podman", "exec", name, "test", "-f", "/tmp/clankbox-auth.json"],
+        check=False,
+        quiet=True,
+    )
+    if result.returncode == 0:
+        run(
+            ["podman", "exec", name, "cp", "/tmp/clankbox-auth.json",
+             "/home/clank/.local/share/opencode/auth.json"],
+            quiet=True,
+        )
+
+
 def ensure_container(name: str, directory: Path) -> bool:
     """Ensure a running container and return whether it was provisioned."""
     state = container_state(name)
@@ -271,11 +286,13 @@ def ensure_container(name: str, directory: Path) -> bool:
         create_container(name, directory)
         info("starting container")
         run(["podman", "start", name], quiet=True)
+        copy_auth_if_present(name)
         provision(name)
         return True
     if state != "running":
         info(f"starting container {name}")
         run(["podman", "start", name], quiet=True)
+        copy_auth_if_present(name)
     if not is_provisioned(name):
         provision(name)
         return True
@@ -436,7 +453,7 @@ PROVISION_MARKER = "/home/clank/.clankbox-provisioned"
 # container and to update an existing one, so first run and 'clankbox update'
 # share a single source of truth. Keep the marker path in sync with
 # PROVISION_MARKER above.
-PROVISION_SCRIPT = r"""set -e
+PROVISION_SCRIPT = r"""set -euo pipefail
 
 echo "clankbox: updating Debian packages"
 sudo apt-get update
@@ -452,7 +469,13 @@ LATEST=$(curl -fsSL https://nodejs.org/dist/index.json \
     | jq -r '[.[] | select(.lts != false)][0].version')
 if [ "$CURRENT" != "$LATEST" ]; then
     echo "clankbox: updating Node.js $CURRENT -> $LATEST"
-    curl -fsSL "https://nodejs.org/dist/${LATEST}/node-${LATEST}-linux-x64.tar.xz" \
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64|amd64) NODE_ARCH=x64 ;;
+        aarch64|arm64) NODE_ARCH=arm64 ;;
+        *) echo "clankbox: unsupported architecture $ARCH for Node.js"; exit 1 ;;
+    esac
+    curl -fsSL "https://nodejs.org/dist/${LATEST}/node-${LATEST}-linux-${NODE_ARCH}.tar.xz" \
         | sudo tar -xJ -C /usr/local --strip-components=1
     sudo rm -rf /root/.npm /tmp/npm-* || true
 else
@@ -466,9 +489,15 @@ curl -fsSL https://opencode.ai/install | bash
 if [ -x /home/clank/.opencode/bin/opencode ]; then
     sudo install -m 0755 /home/clank/.opencode/bin/opencode /usr/local/bin/opencode
     rm -rf /home/clank/.opencode
-    echo "clankbox: opencode updated ($CURRENT_OC -> $(opencode --version))"
+    NEW_OC=$(opencode --version 2>/dev/null || echo "unknown")
+    if [ "$CURRENT_OC" != "$NEW_OC" ]; then
+        echo "clankbox: opencode updated ($CURRENT_OC -> $NEW_OC)"
+    else
+        echo "clankbox: opencode already at latest ($CURRENT_OC)"
+    fi
 else
-    echo "clankbox: opencode already at latest ($CURRENT_OC)"
+    echo "clankbox: opencode install failed (current: $CURRENT_OC)"
+    exit 1
 fi
 
 # pip is the Debian python3-pip package, so apt-get upgrade above keeps it
