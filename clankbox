@@ -551,8 +551,8 @@ if [ "$CURRENT" != "$LATEST" ]; then
         "https://nodejs.org/dist/${LATEST}/SHASUMS256.txt"
     grep " ${NODE_TARBALL}\$" "$TMPDIR/SHASUMS256.txt" > "$TMPDIR/CHECKSUM"
     ( cd "$TMPDIR" && sha256sum -c CHECKSUM )
-    sudo tar -xJ -C /usr/local --strip-components=1 \
-        --exclude='LICENSE' --exclude='README.md' "$TMPDIR/$NODE_TARBALL"
+    sudo tar -xJf "$TMPDIR/$NODE_TARBALL" -C /usr/local --strip-components=1 \
+        --exclude='LICENSE' --exclude='README.md'
     rm -rf "$TMPDIR"
     sudo rm -rf /root/.npm /tmp/npm-* || true
 else
