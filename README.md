@@ -59,15 +59,15 @@ Commands marked with **\*** may create a container for this directory if one doe
 
 ```bash
 cd /path/to/your/project
-clankbox opencode   *     # start opencode (creates/starts container if needed)
-clankbox oc         *     # same (alias for 'opencode')
+clankbox opencode     *    # start opencode (creates/starts container if needed)
+clankbox oc           *    # same (alias for 'opencode')
 ```
 
 From another terminal in the same project directory:
 
 ```bash
-clankbox oc         *     # joins the same container
-clankbox shell      *     # bash in the same container
+clankbox oc           *    # joins the same container
+clankbox shell        *    # bash in the same container
 ```
 
 Manage containers:
@@ -79,7 +79,7 @@ clankbox stop --all
 clankbox rm                # remove this directory's container
 clankbox rm --all          # remove every clankbox container
 clankbox build             # rebuild the image
-clankbox update      *     # update apt packages, Node.js, and opencode
+clankbox update       *    # update apt packages, Node.js, and opencode
 clankbox update --all *    # update all clankbox containers
 ```
 
