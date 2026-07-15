@@ -57,15 +57,15 @@ First run builds the image automatically.
 
 ```bash
 cd /path/to/your/project
-clankbox                 # start opencode (creates/starts container if needed)
-clankbox oc              # same, explicitly (alias for 'opencode')
+clankbox opencode         # start opencode (creates/starts container if needed)
+clankbox oc               # same (alias for 'opencode')
 ```
 
 From another terminal in the same project directory:
 
 ```bash
-clankbox                 # joins the same container
-clankbox shell           # bash in the same container
+clankbox oc               # joins the same container
+clankbox shell            # bash in the same container
 ```
 
 Manage containers:

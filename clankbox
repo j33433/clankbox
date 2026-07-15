@@ -654,17 +654,18 @@ def cmd_help() -> None:
 clankbox - run opencode in a reusable podman container
 
 Usage:
-  clankbox                      Start or attach; run opencode in this directory
-  clankbox opencode [args...]   Run opencode with arguments (alias: oc)
-  clankbox shell [-- cmd...]    Shell into the container (default: bash)
+  clankbox                      Show this help
+  clankbox opencode [args...] * Run opencode (alias: oc)
+  clankbox shell [-- cmd...] *  Shell into the container (default: bash)
                                 use -- to pass flags
   clankbox list                 List all clankbox containers
   clankbox stop [--all|-a]      Stop container for this dir, or all
   clankbox rm [--all|-a]        Remove container for this dir, or all
   clankbox build                Build or rebuild the image (alias: rebuild)
-  clankbox update [--all|-a]    Update apt packages, Node.js, and opencode in
+  clankbox update [--all|-a] *  Update apt packages, Node.js, and opencode in
                                 this container, or all containers
-  clankbox help                 Show this help (also: -h, --help)
+
+  * may create a container for this directory if one does not exist
 
 Behavior:
   - Current directory is mounted at /workspace
@@ -695,7 +696,7 @@ def main(argv: list[str]) -> None:
     elif cmd in ("opencode", "oc"):
         cmd_enter(rest)
     elif cmd == "":
-        cmd_enter([])
+        cmd_help()
     else:
         die(f"unknown command {cmd!r} (try 'clankbox help')")
 
