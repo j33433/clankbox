@@ -55,30 +55,32 @@ First run builds the image automatically.
 
 ## Usage
 
+Commands marked with **\*** may create a container for this directory if one does not exist yet.
+
 ```bash
 cd /path/to/your/project
-clankbox opencode         # start opencode (creates/starts container if needed)
-clankbox oc               # same (alias for 'opencode')
+clankbox opencode   *     # start opencode (creates/starts container if needed)
+clankbox oc         *     # same (alias for 'opencode')
 ```
 
 From another terminal in the same project directory:
 
 ```bash
-clankbox oc               # joins the same container
-clankbox shell            # bash in the same container
+clankbox oc         *     # joins the same container
+clankbox shell      *     # bash in the same container
 ```
 
 Manage containers:
 
 ```bash
-clankbox list            # all clankbox containers
-clankbox stop            # stop this directory's container
+clankbox list              # all clankbox containers
+clankbox stop              # stop this directory's container
 clankbox stop --all
-clankbox rm              # remove this directory's container
-clankbox rm --all        # remove every clankbox container
-clankbox build           # rebuild the image
-clankbox update          # update apt packages, Node.js, and opencode
-clankbox update --all    # update all clankbox containers
+clankbox rm                # remove this directory's container
+clankbox rm --all          # remove every clankbox container
+clankbox build             # rebuild the image
+clankbox update      *     # update apt packages, Node.js, and opencode
+clankbox update --all *    # update all clankbox containers
 ```
 
 Pass arguments through to opencode:
