@@ -51,23 +51,24 @@ chmod +x clankbox
 ln -s "$(pwd)/clankbox" ~/.local/bin/clankbox   # or any directory on your PATH
 ```
 
-First run builds the image automatically.
-
 ## Usage
-
-Commands marked with **\*** may create a container for this directory if one does not exist yet.
 
 ```bash
 cd /path/to/your/project
-clankbox opencode     *    # start opencode (creates/starts container if needed)
-clankbox oc           *    # same (alias for 'opencode')
+clankbox init              # create and provision the container (once per project)
+clankbox opencode          # start opencode
+clankbox oc                # same (alias for 'opencode')
 ```
+
+`init` builds the image if needed, creates the container, and installs Node.js
+and opencode. Other commands require an initialized container and will tell you
+to run `clankbox init` if one does not exist.
 
 From another terminal in the same project directory:
 
 ```bash
-clankbox oc           *    # joins the same container
-clankbox shell        *    # bash in the same container
+clankbox oc                # joins the same container
+clankbox shell             # bash in the same container
 ```
 
 Manage containers:
@@ -79,8 +80,8 @@ clankbox stop --all
 clankbox rm                # remove this directory's container
 clankbox rm --all          # remove every clankbox container
 clankbox build             # rebuild the image
-clankbox update       *    # update apt packages, Node.js, and opencode
-clankbox update --all *    # update all clankbox containers
+clankbox update            # update apt packages, Node.js, and opencode
+clankbox update --all      # update all clankbox containers
 ```
 
 Pass arguments through to opencode:
@@ -113,7 +114,7 @@ If you rename or move a project directory, its container name (a path hash) chan
 Clankbox uses advisory locks in `~/.local/state/clankbox/locks` (or
 `$XDG_STATE_HOME/clankbox/locks`) to serialize image builds and container
 lifecycle operations. Starting sessions from multiple terminals in the same
-workspace is safe: only one can create or start its shared container.
+workspace is safe: only one can start or change its shared container.
 
 The locks are released before `podman exec`, so sessions can run concurrently.
 They do not coordinate changes inside the shared workspace or container home;
@@ -125,7 +126,7 @@ sessions by design.
 
 Debian bookworm slim plus: git, curl, wget, jq, ripgrep, python3, make/g++, openssh-client, zip/unzip, sudo.
 
-Node.js and opencode are not baked into the image. Each container provisions them on first run (the current LTS Node and latest opencode), so a fresh container is always current without rebuilding the image. The same code path backs `clankbox update`. Because of this, the first run in a new directory takes a little longer while it downloads them; later runs reuse the container and start instantly.
+Node.js and opencode are not baked into the image. `clankbox init` provisions them into each container (the current LTS Node and latest opencode), so a fresh container is always current without rebuilding the image. The same code path backs `clankbox update`. Init takes a little longer while it downloads them; later commands reuse the container and start instantly.
 
 The `clank` user has passwordless `sudo`, so the agent can install extra packages (e.g. `sudo apt install ...`). Under rootless podman this is isolated from host root. Packages persist in that directory's container until `clankbox rm`.
 

@@ -322,7 +322,7 @@ def is_provisioned(name: str) -> bool:
 
 def provision(name: str) -> None:
     """Install/update in-container software. Raises if provisioning fails."""
-    info("provisioning tools (first run, this can take a minute)")
+    info("provisioning tools (this can take a minute)")
     run(
         [
             "podman", "exec", "-t", "-w", "/workspace",
@@ -346,25 +346,45 @@ def copy_auth_if_present(name: str) -> None:
         )
 
 
-def ensure_container(name: str, directory: Path) -> bool:
-    """Ensure a running container and return whether it was provisioned."""
+def require_container(name: str, directory: Path) -> None:
+    """Start an existing container; die if none exists for this directory."""
     state = container_state(name)
     if state is None:
-        info(f"no container for {directory}, setting one up")
-        create_container(name, directory)
-        info("starting container")
-        run(["podman", "start", name], quiet=True)
-        copy_auth_if_present(name)
-        provision(name)
-        return True
+        die(f"no container for {directory}; run 'clankbox init' first")
     if state != "running":
         info(f"starting container {name}")
         run(["podman", "start", name], quiet=True)
         copy_auth_if_present(name)
     if not is_provisioned(name):
         provision(name)
-        return True
-    return False
+
+
+def cmd_init() -> None:
+    """Create and provision a container for this directory (idempotent)."""
+    need_podman()
+    ensure_image()
+    directory = workdir()
+    name = container_name(directory)
+    with container_lock(directory):
+        state = container_state(name)
+        if state is None:
+            info(f"no container for {directory}, setting one up")
+            create_container(name, directory)
+            info("starting container")
+            run(["podman", "start", name], quiet=True)
+            copy_auth_if_present(name)
+            provision(name)
+            say(f"initialized {name}")
+            return
+        if state != "running":
+            info(f"starting container {name}")
+            run(["podman", "start", name], quiet=True)
+            copy_auth_if_present(name)
+        if not is_provisioned(name):
+            provision(name)
+            say(f"initialized {name}")
+            return
+        say(f"already initialized ({name})")
 
 
 def exec_in(name: str, command: list[str]) -> None:
@@ -489,11 +509,10 @@ def cmd_stop(args: list[str]) -> None:
 
 def cmd_shell(args: list[str]) -> None:
     need_podman()
-    ensure_image()
     directory = workdir()
     name = container_name(directory)
     with container_lock(directory):
-        ensure_container(name, directory)
+        require_container(name, directory)
     if args and args[0] == "--":
         args = args[1:]
     if not args:
@@ -504,12 +523,11 @@ def cmd_shell(args: list[str]) -> None:
 
 def cmd_enter(args: list[str]) -> None:
     need_podman()
-    ensure_image()
     directory = workdir()
     name = container_name(directory)
     print_logo()
     with container_lock(directory):
-        ensure_container(name, directory)
+        require_container(name, directory)
     if not args:
         exec_in(name, ["bash", "-lc", "exec opencode"])
     else:
@@ -519,10 +537,9 @@ def cmd_enter(args: list[str]) -> None:
 PROVISION_MARKER = "/home/clank/.clankbox-provisioned"
 
 # Installs/updates the software that is not baked into the image (Node.js,
-# opencode) and refreshes apt packages. Used both to provision a fresh
-# container and to update an existing one, so first run and 'clankbox update'
-# share a single source of truth. Keep the marker path in sync with
-# PROVISION_MARKER above.
+# opencode) and refreshes apt packages. Used both by 'clankbox init' and
+# 'clankbox update', so they share a single source of truth. Keep the marker
+# path in sync with PROVISION_MARKER above.
 PROVISION_SCRIPT = r"""set -euo pipefail
 
 echo "clankbox: updating Debian packages"
@@ -592,7 +609,6 @@ echo "clankbox: done"
 
 def cmd_update(args: list[str]) -> None:
     need_podman()
-    ensure_image()
     all_flag = args and args[0] in ("--all", "-a")
 
     if all_flag:
@@ -632,10 +648,7 @@ def cmd_update(args: list[str]) -> None:
     directory = workdir()
     name = container_name(directory)
     with container_lock(directory):
-        provisioned = ensure_container(name, directory)
-        if provisioned:
-            say(f"updated {name}")
-            return
+        require_container(name, directory)
         info(f"updating {name}")
         rc = run(
             [
@@ -658,19 +671,19 @@ clankbox - run opencode in a reusable podman container
 
 Usage:
   clankbox                      Show this help
-  clankbox opencode [args...] * Run opencode (alias: oc)
-  clankbox shell [-- cmd...] *  Shell into the container (default: bash)
+  clankbox init                 Create and provision a container for this dir
+  clankbox opencode [args...]   Run opencode (alias: oc)
+  clankbox shell [-- cmd...]    Shell into the container (default: bash)
                                 use -- to pass flags
   clankbox list                 List all clankbox containers
   clankbox stop [--all|-a]      Stop container for this dir, or all
   clankbox rm [--all|-a]        Remove container for this dir, or all
   clankbox build                Build or rebuild the image (alias: rebuild)
-  clankbox update [--all|-a] *  Update apt packages, Node.js, and opencode in
+  clankbox update [--all|-a]    Update apt packages, Node.js, and opencode in
                                 this container, or all containers
 
-  * may create a container for this directory if one does not exist
-
 Behavior:
+  - Run 'clankbox init' once per project before other commands
   - Current directory is mounted at /workspace
   - One container per absolute path (reused after exit)
   - If the container is already running, a new exec session joins it
@@ -684,6 +697,8 @@ def main(argv: list[str]) -> None:
 
     if cmd in ("help", "-h", "--help"):
         cmd_help()
+    elif cmd == "init":
+        cmd_init()
     elif cmd == "list":
         cmd_list()
     elif cmd == "rm":

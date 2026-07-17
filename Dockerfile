@@ -41,9 +41,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 # Node.js and opencode are not baked into the image. They are provisioned into
-# each container on first run by clankbox (the same code path as 'clankbox
-# update'), so a fresh container always gets the current LTS Node and the
-# latest opencode without rebuilding the image.
+# each container by 'clankbox init' (the same code path as 'clankbox update'),
+# so a fresh container always gets the current LTS Node and the latest
+# opencode without rebuilding the image.
 
 # UID 1000 is remapped to the host user via podman --userns keep-id:uid=1000,gid=1000
 # Passwordless sudo lets the agent install project packages inside the container;
