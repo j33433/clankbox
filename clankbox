@@ -564,13 +564,16 @@ node --version && npm --version
 
 echo "clankbox: updating opencode"
 CURRENT_OC=$(opencode --version 2>/dev/null || echo "none")
-curl -fsSL https://opencode.ai/install | bash
-if [ -x /home/clank/.opencode/bin/opencode ]; then
-    sudo install -m 0755 /home/clank/.opencode/bin/opencode /usr/local/bin/opencode
-    rm -rf /home/clank/.opencode
-    NEW_OC=$(opencode --version 2>/dev/null || echo "unknown")
-    if [ "$CURRENT_OC" != "$NEW_OC" ]; then
-        echo "clankbox: opencode updated ($CURRENT_OC -> $NEW_OC)"
+if curl -fsSL https://opencode.ai/install | bash; then
+    if [ -x /home/clank/.opencode/bin/opencode ]; then
+        sudo install -m 0755 /home/clank/.opencode/bin/opencode /usr/local/bin/opencode
+        rm -rf /home/clank/.opencode
+        NEW_OC=$(opencode --version 2>/dev/null || echo "unknown")
+        if [ "$CURRENT_OC" != "$NEW_OC" ]; then
+            echo "clankbox: opencode updated ($CURRENT_OC -> $NEW_OC)"
+        else
+            echo "clankbox: opencode already at latest ($CURRENT_OC)"
+        fi
     else
         echo "clankbox: opencode already at latest ($CURRENT_OC)"
     fi
