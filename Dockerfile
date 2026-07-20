@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/clank \
-    PATH=/usr/local/bin:/usr/bin:/bin \
+    PATH=/usr/local/bin:/usr/bin:/bin:/home/clank/.local/bin \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     OPENCODE_DISABLE_AUTOUPDATE=1
@@ -12,6 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Node binary into each container instead.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
+    bzip2 \
     ca-certificates \
     curl \
     file \
