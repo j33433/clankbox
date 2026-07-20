@@ -16,6 +16,9 @@ from typing import NoReturn
 IMAGE = "localhost/clankbox:latest"
 LABEL_KEY = "clankbox"
 LABEL_WORKDIR = "clankbox.workdir"
+LABEL_NVIDIA = "clankbox.nvidia"
+# CUDA runtime package stream from NVIDIA's Debian repo (not the full toolkit).
+CUDA_RUNTIME_STREAM = "12-6"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 LOGO = """\
@@ -210,7 +213,7 @@ def ensure_image() -> None:
             build_image()
 
 
-def create_container(name: str, directory: Path) -> None:
+def create_container(name: str, directory: Path, *, nvidia: bool = False) -> None:
     guard_workspace(directory)
     home = Path.home()
     if ":" in str(home):
@@ -250,6 +253,15 @@ def create_container(name: str, directory: Path) -> None:
         "-e",
         f"LC_ALL={os.environ.get('LC_ALL') or os.environ.get('LANG', 'C.UTF-8')}",
     ]
+    if nvidia:
+        args.extend(
+            [
+                "--device",
+                "nvidia.com/gpu=all",
+                "--label",
+                f"{LABEL_NVIDIA}=1",
+            ]
+        )
     if colorterm := os.environ.get("COLORTERM"):
         args.extend(["-e", f"COLORTERM={colorterm}"])
 
@@ -304,8 +316,42 @@ def create_container(name: str, directory: Path) -> None:
         args.extend(["-v", f"{config}:/home/clank/.config/opencode:ro,z"])
 
     args.extend([IMAGE, "sleep", "infinity"])
-    info("creating container")
-    run(args, quiet=True)
+    info("creating container" + (" with NVIDIA GPU" if nvidia else ""))
+    result = run(args, check=False, capture=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        if nvidia:
+            die(
+                "failed to create container with GPU access. "
+                "Host needs an NVIDIA driver and nvidia-container-toolkit "
+                f"with CDI (device nvidia.com/gpu=all).\n{detail}"
+            )
+        die(f"failed to create container\n{detail}")
+
+
+def container_label(name: str, key: str) -> str | None:
+    """Return a container label value, or None if missing/unreadable."""
+    result = run(
+        [
+            "podman",
+            "inspect",
+            "-f",
+            f'{{{{index .Config.Labels "{key}"}}}}',
+            name,
+        ],
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        return None
+    value = (result.stdout or "").strip()
+    if not value or value == "<no value>":
+        return None
+    return value
+
+
+def container_has_nvidia(name: str) -> bool:
+    return container_label(name, LABEL_NVIDIA) == "1"
 
 
 def is_provisioned(name: str) -> bool:
@@ -320,6 +366,18 @@ def is_provisioned(name: str) -> bool:
     )
 
 
+def is_nvidia_provisioned(name: str) -> bool:
+    """True if NVIDIA runtime libs have been provisioned in the container."""
+    return (
+        run(
+            ["podman", "exec", name, "test", "-f", NVIDIA_PROVISION_MARKER],
+            check=False,
+            quiet=True,
+        ).returncode
+        == 0
+    )
+
+
 def provision(name: str) -> None:
     """Install/update in-container software. Raises if provisioning fails."""
     info("provisioning tools (this can take a minute)")
@@ -327,6 +385,17 @@ def provision(name: str) -> None:
         [
             "podman", "exec", "-t", "-w", "/workspace",
             name, "bash", "-lc", PROVISION_SCRIPT,
+        ]
+    )
+
+
+def provision_nvidia(name: str) -> None:
+    """Install CUDA runtime libraries and verify GPU access."""
+    info("provisioning NVIDIA CUDA runtime libraries")
+    run(
+        [
+            "podman", "exec", "-t", "-w", "/workspace",
+            name, "bash", "-lc", NVIDIA_PROVISION_SCRIPT,
         ]
     )
 
@@ -346,6 +415,21 @@ def copy_auth_if_present(name: str) -> None:
         )
 
 
+def start_container(name: str, *, nvidia: bool = False) -> None:
+    """Start a container; surface a clear error when GPU/CDI setup is missing."""
+    result = run(["podman", "start", name], check=False, capture=True)
+    if result.returncode == 0:
+        return
+    detail = (result.stderr or result.stdout or "").strip()
+    if nvidia or container_has_nvidia(name):
+        die(
+            "failed to start container with GPU access. "
+            "Host needs an NVIDIA driver and nvidia-container-toolkit "
+            f"with CDI (device nvidia.com/gpu=all).\n{detail}"
+        )
+    die(f"failed to start container {name}\n{detail}")
+
+
 def require_container(name: str, directory: Path) -> None:
     """Start an existing container; die if none exists for this directory."""
     state = container_state(name)
@@ -353,14 +437,23 @@ def require_container(name: str, directory: Path) -> None:
         die(f"no container for {directory}; run 'clankbox init' first")
     if state != "running":
         info(f"starting container {name}")
-        run(["podman", "start", name], quiet=True)
+        start_container(name)
         copy_auth_if_present(name)
     if not is_provisioned(name):
         provision(name)
+    if container_has_nvidia(name) and not is_nvidia_provisioned(name):
+        provision_nvidia(name)
 
 
-def cmd_init() -> None:
+def cmd_init(args: list[str]) -> None:
     """Create and provision a container for this directory (idempotent)."""
+    nvidia = False
+    for arg in args:
+        if arg == "--nvidia":
+            nvidia = True
+        else:
+            die(f"unknown init option {arg!r} (try 'clankbox help')")
+
     need_podman()
     ensure_image()
     directory = workdir()
@@ -369,20 +462,47 @@ def cmd_init() -> None:
         state = container_state(name)
         if state is None:
             info(f"no container for {directory}, setting one up")
-            create_container(name, directory)
+            create_container(name, directory, nvidia=nvidia)
             info("starting container")
-            run(["podman", "start", name], quiet=True)
+            start_result = run(["podman", "start", name], check=False, capture=True)
+            if start_result.returncode != 0:
+                detail = (start_result.stderr or start_result.stdout or "").strip()
+                run(["podman", "rm", "-f", name], check=False, quiet=True)
+                if nvidia:
+                    die(
+                        "failed to start container with GPU access. "
+                        "Host needs an NVIDIA driver and nvidia-container-toolkit "
+                        f"with CDI (device nvidia.com/gpu=all).\n{detail}"
+                    )
+                die(f"failed to start container {name}\n{detail}")
             copy_auth_if_present(name)
             provision(name)
-            say(f"initialized {name}")
+            if nvidia:
+                provision_nvidia(name)
+            say(f"initialized {name}" + (" with NVIDIA GPU" if nvidia else ""))
             return
+
+        has_nvidia = container_has_nvidia(name)
+        if nvidia and not has_nvidia:
+            die(
+                f"{name} already exists without GPU access; "
+                f"run 'clankbox rm' then 'clankbox init --nvidia'"
+            )
+
         if state != "running":
             info(f"starting container {name}")
-            run(["podman", "start", name], quiet=True)
+            start_container(name, nvidia=has_nvidia)
             copy_auth_if_present(name)
+
+        did_work = False
         if not is_provisioned(name):
             provision(name)
-            say(f"initialized {name}")
+            did_work = True
+        if has_nvidia and not is_nvidia_provisioned(name):
+            provision_nvidia(name)
+            did_work = True
+        if did_work:
+            say(f"initialized {name}" + (" with NVIDIA GPU" if has_nvidia else ""))
             return
         say(f"already initialized ({name})")
 
@@ -535,6 +655,7 @@ def cmd_enter(args: list[str]) -> None:
 
 
 PROVISION_MARKER = "/home/clank/.clankbox-provisioned"
+NVIDIA_PROVISION_MARKER = "/home/clank/.clankbox-nvidia-provisioned"
 
 # Installs/updates the software that is not baked into the image (Node.js,
 # opencode) and refreshes apt packages. Used both by 'clankbox init' and
@@ -606,6 +727,51 @@ touch /home/clank/.clankbox-provisioned
 echo "clankbox: done"
 """
 
+# CUDA runtime libraries (not the full toolkit) from NVIDIA's Debian repo.
+# Driver userspace and nvidia-smi come from the host via CDI
+# (--device nvidia.com/gpu=all). Keep the marker path in sync with
+# NVIDIA_PROVISION_MARKER above. CUDA_RUNTIME_STREAM is substituted below.
+NVIDIA_PROVISION_SCRIPT_TEMPLATE = r"""set -euo pipefail
+
+CUDA_STREAM="__CUDA_RUNTIME_STREAM__"
+
+echo "clankbox: installing NVIDIA CUDA runtime libraries (${CUDA_STREAM})"
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) NVIDIA_ARCH=x86_64 ;;
+    arm64) NVIDIA_ARCH=sbsa ;;
+    *)
+        echo "clankbox: unsupported architecture $ARCH for CUDA packages"
+        exit 1
+        ;;
+esac
+
+KEYRING_DEB="cuda-keyring_1.1-1_all.deb"
+KEYRING_URL="https://developer.download.nvidia.com/compute/cuda/repos/debian12/${NVIDIA_ARCH}/${KEYRING_DEB}"
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+curl -fsSL -o "$TMPDIR/$KEYRING_DEB" "$KEYRING_URL"
+sudo dpkg -i "$TMPDIR/$KEYRING_DEB"
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends "cuda-libraries-${CUDA_STREAM}"
+sudo apt-get clean
+sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+echo "clankbox: verifying GPU access (nvidia-smi)"
+if ! nvidia-smi; then
+    echo "clankbox: nvidia-smi failed. Host needs an NVIDIA driver and" >&2
+    echo "clankbox: nvidia-container-toolkit with CDI (nvidia.com/gpu=all)." >&2
+    exit 1
+fi
+
+touch /home/clank/.clankbox-nvidia-provisioned
+echo "clankbox: NVIDIA provisioning done"
+"""
+
+NVIDIA_PROVISION_SCRIPT = NVIDIA_PROVISION_SCRIPT_TEMPLATE.replace(
+    "__CUDA_RUNTIME_STREAM__", CUDA_RUNTIME_STREAM
+)
+
 
 def cmd_update(args: list[str]) -> None:
     need_podman()
@@ -637,6 +803,15 @@ def cmd_update(args: list[str]) -> None:
                     ],
                     check=False,
                 ).returncode
+                if rc == 0 and container_has_nvidia(name):
+                    info(f"updating NVIDIA runtime in {name}")
+                    rc = run(
+                        [
+                            "podman", "exec", "-t", "-w", "/workspace",
+                            name, "bash", "-lc", NVIDIA_PROVISION_SCRIPT,
+                        ],
+                        check=False,
+                    ).returncode
                 if rc == 0:
                     say(f"updated {name}")
                 else:
@@ -657,6 +832,15 @@ def cmd_update(args: list[str]) -> None:
             ],
             check=False,
         ).returncode
+        if rc == 0 and container_has_nvidia(name):
+            info(f"updating NVIDIA runtime in {name}")
+            rc = run(
+                [
+                    "podman", "exec", "-t", "-w", "/workspace",
+                    name, "bash", "-lc", NVIDIA_PROVISION_SCRIPT,
+                ],
+                check=False,
+            ).returncode
         if rc == 0:
             say(f"updated {name}")
         else:
@@ -671,7 +855,8 @@ clankbox - run opencode in a reusable podman container
 
 Usage:
   clankbox                      Show this help
-  clankbox init                 Create and provision a container for this dir
+  clankbox init [--nvidia]      Create and provision a container for this dir
+                                --nvidia: GPU via CDI + CUDA runtime libs
   clankbox opencode [args...]   Run opencode (alias: oc)
   clankbox shell [-- cmd...]    Shell into the container (default: bash)
                                 use -- to pass flags
@@ -681,13 +866,15 @@ Usage:
   clankbox build                Build or rebuild the image (alias: rebuild)
   clankbox update [--all|-a]    Update apt packages, Node.js, and opencode in
                                 this container, or all containers
+                                (also CUDA runtime if init --nvidia was used)
 
 Behavior:
   - Run 'clankbox init' once per project before other commands
   - Current directory is mounted at /workspace
   - One container per absolute path (reused after exit)
   - If the container is already running, a new exec session joins it
-  - Network is enabled; common CLI tools are preinstalled"""
+  - Network is enabled; common CLI tools are preinstalled
+  - init --nvidia needs host NVIDIA driver + nvidia-container-toolkit (CDI)"""
     )
 
 
@@ -698,7 +885,7 @@ def main(argv: list[str]) -> None:
     if cmd in ("help", "-h", "--help"):
         cmd_help()
     elif cmd == "init":
-        cmd_init()
+        cmd_init(rest)
     elif cmd == "list":
         cmd_list()
     elif cmd == "rm":
