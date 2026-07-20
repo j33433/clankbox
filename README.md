@@ -56,6 +56,7 @@ ln -s "$(pwd)/clankbox" ~/.local/bin/clankbox   # or any directory on your PATH
 ```bash
 cd /path/to/your/project
 clankbox init              # create and provision the container (once per project)
+clankbox init --nvidia     # same, plus GPU access and CUDA runtime libraries
 clankbox opencode          # start opencode
 clankbox oc                # same (alias for 'opencode')
 ```
@@ -63,6 +64,12 @@ clankbox oc                # same (alias for 'opencode')
 `init` builds the image if needed, creates the container, and installs Node.js
 and opencode. Other commands require an initialized container and will tell you
 to run `clankbox init` if one does not exist.
+
+`init --nvidia` adds CDI GPU access (`--device nvidia.com/gpu=all`) and installs
+NVIDIA CUDA runtime libraries inside the container (not the full toolkit). The
+host needs an NVIDIA driver and [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html)
+with CDI. To enable GPU on an existing container: `clankbox rm` then
+`clankbox init --nvidia`.
 
 From another terminal in the same project directory:
 
@@ -104,6 +111,7 @@ clankbox oc run "explain this repo"
 | Host auth | Mounts `~/.local/share/opencode/auth.json`, `~/.config/opencode`, `~/.gitconfig` (read-only) when present |
 | API keys | Forwards every `*_API_KEY` env var, plus `GITHUB_TOKEN` / `GH_TOKEN`, at exec time via pass-through (values not in podman args) |
 | Resource limits | 512 PIDs, 4g memory (override via `CLANKBOX_PIDS` / `CLANKBOX_MEMORY`) |
+| GPU (optional) | `init --nvidia`: CDI device `nvidia.com/gpu=all` at create time; CUDA runtime libs provisioned in-container; label `clankbox.nvidia=1` |
 
 Containers are labeled `clankbox=1` so list/rm can find them. The host wrapper is Python 3 (stdlib only).
 
