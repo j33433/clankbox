@@ -17,9 +17,12 @@ IMAGE = "localhost/clankbox:latest"
 LABEL_KEY = "clankbox"
 LABEL_WORKDIR = "clankbox.workdir"
 LABEL_NVIDIA = "clankbox.nvidia"
+LABEL_X11 = "clankbox.x11"
 # CUDA runtime package stream from NVIDIA's Debian repo (not the full toolkit).
 CUDA_RUNTIME_STREAM = "12-6"
 SCRIPT_DIR = Path(__file__).resolve().parent
+X11_SOCKET_DIR = Path("/tmp/.X11-unix")
+WSLG_DIR = Path("/mnt/wslg")
 
 LOGO = """\
   ▓▓▓▓▓▓▓▓▓▓▓▓▓
@@ -213,13 +216,65 @@ def ensure_image() -> None:
             build_image()
 
 
-def create_container(name: str, directory: Path, *, nvidia: bool = False) -> None:
+def is_wsl() -> bool:
+    """True when running under WSL (including WSL2 / WSLg)."""
+    try:
+        return "microsoft" in Path("/proc/version").read_text().lower()
+    except OSError:
+        return False
+
+
+def host_xauthority() -> Path | None:
+    """Return the host Xauthority file path if it exists."""
+    env_path = os.environ.get("XAUTHORITY")
+    if env_path:
+        path = Path(env_path)
+        if path.is_file():
+            return path
+    default = Path.home() / ".Xauthority"
+    if default.is_file():
+        return default
+    return None
+
+
+def require_x11_host() -> str:
+    """Validate host X11 setup; return DISPLAY value."""
+    display = os.environ.get("DISPLAY")
+    if not display:
+        die(
+            "DISPLAY is not set. Start an X server (or WSLg) and export DISPLAY "
+            "(e.g. DISPLAY=:0) before 'clankbox init --x11'"
+        )
+    if not X11_SOCKET_DIR.is_dir():
+        die(
+            f"X11 socket directory {X11_SOCKET_DIR} not found. "
+            "Unix-socket displays (e.g. DISPLAY=:0) are required for "
+            "'clankbox init --x11' on Linux and WSL2/WSLg"
+        )
+    return display
+
+
+def init_features_suffix(*, nvidia: bool, x11: bool) -> str:
+    parts: list[str] = []
+    if nvidia:
+        parts.append("NVIDIA GPU")
+    if x11:
+        parts.append("X11")
+    if not parts:
+        return ""
+    return " with " + " and ".join(parts)
+
+
+def create_container(
+    name: str, directory: Path, *, nvidia: bool = False, x11: bool = False
+) -> None:
     guard_workspace(directory)
     home = Path.home()
     if ":" in str(home):
         die(
             f"cannot mount host files: home path contains ':' ({home})"
         )
+    display = require_x11_host() if x11 else None
     args: list[str] = [
         "podman",
         "create",
@@ -262,6 +317,29 @@ def create_container(name: str, directory: Path, *, nvidia: bool = False) -> Non
                 f"{LABEL_NVIDIA}=1",
             ]
         )
+    if x11:
+        assert display is not None
+        args.extend(
+            [
+                "--label",
+                f"{LABEL_X11}=1",
+                "-e",
+                f"DISPLAY={display}",
+                "-v",
+                f"{X11_SOCKET_DIR}:{X11_SOCKET_DIR}:ro",
+            ]
+        )
+        if is_wsl() and WSLG_DIR.is_dir():
+            args.extend(["-v", f"{WSLG_DIR}:{WSLG_DIR}:ro"])
+        if xauth := host_xauthority():
+            args.extend(
+                [
+                    "-v",
+                    f"{xauth}:/home/clank/.Xauthority:ro,z",
+                    "-e",
+                    "XAUTHORITY=/home/clank/.Xauthority",
+                ]
+            )
     if colorterm := os.environ.get("COLORTERM"):
         args.extend(["-e", f"COLORTERM={colorterm}"])
 
@@ -316,7 +394,7 @@ def create_container(name: str, directory: Path, *, nvidia: bool = False) -> Non
         args.extend(["-v", f"{config}:/home/clank/.config/opencode:ro,z"])
 
     args.extend([IMAGE, "sleep", "infinity"])
-    info("creating container" + (" with NVIDIA GPU" if nvidia else ""))
+    info("creating container" + init_features_suffix(nvidia=nvidia, x11=x11))
     result = run(args, check=False, capture=True)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
@@ -325,6 +403,12 @@ def create_container(name: str, directory: Path, *, nvidia: bool = False) -> Non
                 "failed to create container with GPU access. "
                 "Host needs an NVIDIA driver and nvidia-container-toolkit "
                 f"with CDI (device nvidia.com/gpu=all).\n{detail}"
+            )
+        if x11:
+            die(
+                "failed to create container with X11 access. "
+                "Host needs a working X server (or WSLg) with DISPLAY set "
+                f"and {X11_SOCKET_DIR} available.\n{detail}"
             )
         die(f"failed to create container\n{detail}")
 
@@ -354,6 +438,10 @@ def container_has_nvidia(name: str) -> bool:
     return container_label(name, LABEL_NVIDIA) == "1"
 
 
+def container_has_x11(name: str) -> bool:
+    return container_label(name, LABEL_X11) == "1"
+
+
 def is_provisioned(name: str) -> bool:
     """True if the container has completed provisioning (Node, opencode)."""
     return (
@@ -371,6 +459,18 @@ def is_nvidia_provisioned(name: str) -> bool:
     return (
         run(
             ["podman", "exec", name, "test", "-f", NVIDIA_PROVISION_MARKER],
+            check=False,
+            quiet=True,
+        ).returncode
+        == 0
+    )
+
+
+def is_x11_provisioned(name: str) -> bool:
+    """True if X11 libraries have been provisioned in the container."""
+    return (
+        run(
+            ["podman", "exec", name, "test", "-f", X11_PROVISION_MARKER],
             check=False,
             quiet=True,
         ).returncode
@@ -396,6 +496,17 @@ def provision_nvidia(name: str) -> None:
         [
             "podman", "exec", "-t", "-w", "/workspace",
             name, "bash", "-lc", NVIDIA_PROVISION_SCRIPT,
+        ]
+    )
+
+
+def provision_x11(name: str) -> None:
+    """Install basic X11 libraries/apps and verify display access."""
+    info("provisioning X11 libraries")
+    run(
+        [
+            "podman", "exec", "-t", "-w", "/workspace",
+            name, "bash", "-lc", X11_PROVISION_SCRIPT,
         ]
     )
 
@@ -443,14 +554,19 @@ def require_container(name: str, directory: Path) -> None:
         provision(name)
     if container_has_nvidia(name) and not is_nvidia_provisioned(name):
         provision_nvidia(name)
+    if container_has_x11(name) and not is_x11_provisioned(name):
+        provision_x11(name)
 
 
 def cmd_init(args: list[str]) -> None:
     """Create and provision a container for this directory (idempotent)."""
     nvidia = False
+    x11 = False
     for arg in args:
         if arg == "--nvidia":
             nvidia = True
+        elif arg == "--x11":
+            x11 = True
         else:
             die(f"unknown init option {arg!r} (try 'clankbox help')")
 
@@ -462,7 +578,7 @@ def cmd_init(args: list[str]) -> None:
         state = container_state(name)
         if state is None:
             info(f"no container for {directory}, setting one up")
-            create_container(name, directory, nvidia=nvidia)
+            create_container(name, directory, nvidia=nvidia, x11=x11)
             info("starting container")
             start_result = run(["podman", "start", name], check=False, capture=True)
             if start_result.returncode != 0:
@@ -474,19 +590,36 @@ def cmd_init(args: list[str]) -> None:
                         "Host needs an NVIDIA driver and nvidia-container-toolkit "
                         f"with CDI (device nvidia.com/gpu=all).\n{detail}"
                     )
+                if x11:
+                    die(
+                        "failed to start container with X11 access. "
+                        "Host needs a working X server (or WSLg) with DISPLAY set "
+                        f"and {X11_SOCKET_DIR} available.\n{detail}"
+                    )
                 die(f"failed to start container {name}\n{detail}")
             copy_auth_if_present(name)
             provision(name)
             if nvidia:
                 provision_nvidia(name)
-            say(f"initialized {name}" + (" with NVIDIA GPU" if nvidia else ""))
+            if x11:
+                provision_x11(name)
+            say(
+                f"initialized {name}"
+                + init_features_suffix(nvidia=nvidia, x11=x11)
+            )
             return
 
         has_nvidia = container_has_nvidia(name)
+        has_x11 = container_has_x11(name)
         if nvidia and not has_nvidia:
             die(
                 f"{name} already exists without GPU access; "
                 f"run 'clankbox rm' then 'clankbox init --nvidia'"
+            )
+        if x11 and not has_x11:
+            die(
+                f"{name} already exists without X11 access; "
+                f"run 'clankbox rm' then 'clankbox init --x11'"
             )
 
         if state != "running":
@@ -501,8 +634,14 @@ def cmd_init(args: list[str]) -> None:
         if has_nvidia and not is_nvidia_provisioned(name):
             provision_nvidia(name)
             did_work = True
+        if has_x11 and not is_x11_provisioned(name):
+            provision_x11(name)
+            did_work = True
         if did_work:
-            say(f"initialized {name}" + (" with NVIDIA GPU" if has_nvidia else ""))
+            say(
+                f"initialized {name}"
+                + init_features_suffix(nvidia=has_nvidia, x11=has_x11)
+            )
             return
         say(f"already initialized ({name})")
 
@@ -521,6 +660,12 @@ def exec_in(name: str, command: list[str]) -> None:
         "-e",
         f"LC_ALL={os.environ.get('LC_ALL') or os.environ.get('LANG', 'C.UTF-8')}",
     ]
+    if container_has_x11(name):
+        if display := os.environ.get("DISPLAY"):
+            args.extend(["-e", f"DISPLAY={display}"])
+        # Cookie file is bind-mounted at create time to this fixed path.
+        if host_xauthority() is not None:
+            args.extend(["-e", "XAUTHORITY=/home/clank/.Xauthority"])
     for key in passthrough_env():
         if os.environ.get(key):
             args.extend(["-e", key])
@@ -656,6 +801,7 @@ def cmd_enter(args: list[str]) -> None:
 
 PROVISION_MARKER = "/home/clank/.clankbox-provisioned"
 NVIDIA_PROVISION_MARKER = "/home/clank/.clankbox-nvidia-provisioned"
+X11_PROVISION_MARKER = "/home/clank/.clankbox-x11-provisioned"
 
 # Installs/updates the software that is not baked into the image (Node.js,
 # opencode) and refreshes apt packages. Used both by 'clankbox init' and
@@ -772,6 +918,36 @@ NVIDIA_PROVISION_SCRIPT = NVIDIA_PROVISION_SCRIPT_TEMPLATE.replace(
     "__CUDA_RUNTIME_STREAM__", CUDA_RUNTIME_STREAM
 )
 
+# Basic X11 client libraries and xeyes for smoke-testing host display
+# passthrough. Keep the marker path in sync with X11_PROVISION_MARKER above.
+X11_PROVISION_SCRIPT = r"""set -euo pipefail
+
+echo "clankbox: installing X11 libraries and xeyes"
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+    x11-apps \
+    x11-utils \
+    libx11-6 \
+    libxext6 \
+    libxrender1 \
+    libxtst6 \
+    libxi6 \
+    libxfixes3 \
+    fonts-dejavu-core
+sudo apt-get clean
+sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+echo "clankbox: verifying X11 display access (xdpyinfo)"
+if ! xdpyinfo >/dev/null; then
+    echo "clankbox: xdpyinfo failed. Host needs a working X server (or WSLg)" >&2
+    echo "clankbox: with DISPLAY set and /tmp/.X11-unix available." >&2
+    exit 1
+fi
+
+touch /home/clank/.clankbox-x11-provisioned
+echo "clankbox: X11 provisioning done"
+"""
+
 
 def cmd_update(args: list[str]) -> None:
     need_podman()
@@ -812,6 +988,15 @@ def cmd_update(args: list[str]) -> None:
                         ],
                         check=False,
                     ).returncode
+                if rc == 0 and container_has_x11(name):
+                    info(f"updating X11 packages in {name}")
+                    rc = run(
+                        [
+                            "podman", "exec", "-t", "-w", "/workspace",
+                            name, "bash", "-lc", X11_PROVISION_SCRIPT,
+                        ],
+                        check=False,
+                    ).returncode
                 if rc == 0:
                     say(f"updated {name}")
                 else:
@@ -841,6 +1026,15 @@ def cmd_update(args: list[str]) -> None:
                 ],
                 check=False,
             ).returncode
+        if rc == 0 and container_has_x11(name):
+            info(f"updating X11 packages in {name}")
+            rc = run(
+                [
+                    "podman", "exec", "-t", "-w", "/workspace",
+                    name, "bash", "-lc", X11_PROVISION_SCRIPT,
+                ],
+                check=False,
+            ).returncode
         if rc == 0:
             say(f"updated {name}")
         else:
@@ -855,8 +1049,9 @@ clankbox - run opencode in a reusable podman container
 
 Usage:
   clankbox                      Show this help
-  clankbox init [--nvidia]      Create and provision a container for this dir
+  clankbox init [options]       Create and provision a container for this dir
                                 --nvidia: GPU via CDI + CUDA runtime libs
+                                --x11: host display passthrough + xeyes
   clankbox opencode [args...]   Run opencode (alias: oc)
   clankbox shell [-- cmd...]    Shell into the container (default: bash)
                                 use -- to pass flags
@@ -866,7 +1061,7 @@ Usage:
   clankbox build                Build or rebuild the image (alias: rebuild)
   clankbox update [--all|-a]    Update apt packages, Node.js, and opencode in
                                 this container, or all containers
-                                (also CUDA runtime if init --nvidia was used)
+                                (also CUDA/X11 extras if those init flags were used)
 
 Behavior:
   - Run 'clankbox init' once per project before other commands
@@ -874,7 +1069,8 @@ Behavior:
   - One container per absolute path (reused after exit)
   - If the container is already running, a new exec session joins it
   - Network is enabled; common CLI tools are preinstalled
-  - init --nvidia needs host NVIDIA driver + nvidia-container-toolkit (CDI)"""
+  - init --nvidia needs host NVIDIA driver + nvidia-container-toolkit (CDI)
+  - init --x11 needs host DISPLAY and /tmp/.X11-unix (Linux or WSL2/WSLg)"""
     )
 
 
