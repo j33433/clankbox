@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/clank \
@@ -42,9 +42,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 # Node.js and opencode are not baked into the image. They are provisioned into
-# each container by 'clankbox init' (the same code path as 'clankbox update'),
-# so a fresh container always gets the current LTS Node and the latest
-# opencode without rebuilding the image.
+# each container by 'clankbox init' (the same code path as 'clankbox update')
+# from versions and hashes pinned in artifacts.json.
 
 # UID 1000 is remapped to the host user via podman --userns keep-id:uid=1000,gid=1000
 # Passwordless sudo lets the agent install project packages inside the container;

@@ -1,0 +1,27 @@
+{
+  "debian_image": "debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+  "node": {
+    "version": "v24.18.0",
+    "sha256": {
+      "x64": "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742",
+      "arm64": "58c9520501f6ae2b52d5b210444e24b9d0c029a58c5011b797bc1fe7105886f6"
+    }
+  },
+  "opencode": {
+    "version": "1.18.4",
+    "sha256": {
+      "x64": "bab463c3fb3224d388bb7cfad63f38703df9cf0be2cfd2ce8cb49d886b53a174",
+      "x64-baseline": "4d87e414607b77fef940256021e42fbbf37b8c62b06ced76b69e26c5dcbfbabc",
+      "arm64": "eba87efba3976d533a24cca0316f8ef375b5f8e797c0a95c25ee919700b7ba35"
+    }
+  },
+  "nvidia_keyring": {
+    "version": "1.1-1",
+    "filename": "cuda-keyring_1.1-1_all.deb",
+    "sha256": {
+      "x86_64": "e7f219eab6fe4819cdb5c15b98233dc3420302d9c00883219cd3d896857cf48d",
+      "sbsa": "bf2f53b1a19259501119f732bdef2699f8c80c69a18e6a78dad78d67d96766dc"
+    }
+  },
+  "cuda_runtime_stream": "12-6"
+}
