@@ -846,8 +846,6 @@ echo "clankbox: updating Debian packages"
 sudo apt-get update
 sudo apt-get upgrade -y
 sudo apt-get autoremove -y
-sudo apt-get clean
-sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 echo "clankbox: checking Node.js"
 CURRENT=$(node --version 2>/dev/null || echo "none")
@@ -933,8 +931,6 @@ curl -fsSL -o "$TMPDIR/$KEYRING_DEB" "$KEYRING_URL"
 sudo dpkg -i "$TMPDIR/$KEYRING_DEB"
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends "cuda-libraries-${CUDA_STREAM}"
-sudo apt-get clean
-sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 echo "clankbox: verifying GPU access (nvidia-smi)"
 if ! nvidia-smi; then
@@ -967,8 +963,6 @@ sudo apt-get install -y --no-install-recommends \
     libxi6 \
     libxfixes3 \
     fonts-dejavu-core
-sudo apt-get clean
-sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 echo "clankbox: verifying X11 display access (xdpyinfo)"
 if ! xdpyinfo >/dev/null; then
