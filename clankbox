@@ -745,6 +745,103 @@ def cmd_list() -> None:
         print(f"{name:<24} {status:<28} {work}")
 
 
+def human_size(num: int | float) -> str:
+    """Format a byte count like 1.5G / 530M (podman-style, base 1000)."""
+    n = float(num)
+    for unit, suffix in (
+        (1_000_000_000_000, "T"),
+        (1_000_000_000, "G"),
+        (1_000_000, "M"),
+        (1_000, "K"),
+    ):
+        if n >= unit:
+            value = n / unit
+            if value >= 100:
+                return f"{value:.0f}{suffix}"
+            if value >= 10:
+                return f"{value:.1f}{suffix}"
+            return f"{value:.2f}{suffix}"
+    return f"{int(n)}B"
+
+
+def cmd_df() -> None:
+    """Show disk space used by clankbox sandboxes (container RW layers + image)."""
+    need_podman()
+    result = run(
+        [
+            "podman",
+            "ps",
+            "-a",
+            "--filter",
+            f"label={LABEL_KEY}=1",
+            "--format",
+            "{{.Names}}",
+        ],
+        check=False,
+        capture=True,
+    )
+    names = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+
+    image_size = 0
+    image_inspect = run(
+        ["podman", "image", "inspect", "-f", "{{.Size}}", IMAGE],
+        check=False,
+        capture=True,
+    )
+    if image_inspect.returncode == 0:
+        raw = (image_inspect.stdout or "").strip()
+        if raw.isdigit():
+            image_size = int(raw)
+
+    if not names and image_size == 0:
+        say("no clankbox containers or image")
+        return
+
+    total_rw = 0
+    if names:
+        print(f"{'NAMES':<24} {'SIZE':>8} {'VIRTUAL':>8}  WORKDIR")
+        for name in names:
+            inspect = run(
+                [
+                    "podman",
+                    "inspect",
+                    "--size",
+                    "-f",
+                    (
+                        "{{.SizeRw}}\t{{.SizeRootFs}}\t"
+                        f'{{{{index .Config.Labels "{LABEL_WORKDIR}"}}}}'
+                    ),
+                    name,
+                ],
+                check=False,
+                capture=True,
+            )
+            size_rw = 0
+            size_root = 0
+            work = ""
+            if inspect.returncode == 0:
+                parts = (inspect.stdout or "").strip().split("\t")
+                if len(parts) >= 1 and parts[0] not in ("", "<nil>") and parts[0].lstrip("-").isdigit():
+                    size_rw = int(parts[0])
+                if len(parts) >= 2 and parts[1] not in ("", "<nil>") and parts[1].lstrip("-").isdigit():
+                    size_root = int(parts[1])
+                if len(parts) >= 3:
+                    work = parts[2]
+            total_rw += max(size_rw, 0)
+            print(
+                f"{name:<24} {human_size(max(size_rw, 0)):>8} "
+                f"{human_size(max(size_root, 0)):>8}  {work}"
+            )
+        print()
+
+    print(f"{'ITEM':<32} {'SIZE':>8}")
+    if image_size:
+        print(f"{IMAGE:<32} {human_size(image_size):>8}")
+    if names:
+        print(f"{'containers (writable)':<32} {human_size(total_rw):>8}")
+        print(f"{'total (image + writable)':<32} {human_size(image_size + total_rw):>8}")
+
+
 def cmd_rm(args: list[str]) -> None:
     need_podman()
     all_flag = args and args[0] in ("--all", "-a")
@@ -1086,6 +1183,7 @@ Usage:
   clankbox shell [-- cmd...]    Shell into the container (default: bash)
                                 use -- to pass flags
   clankbox list                 List all clankbox containers
+  clankbox df                   Show disk space used by sandboxes
   clankbox stop [--all|-a]      Stop container for this dir, or all
   clankbox rm [--all|-a]        Remove container for this dir, or all
   clankbox build                Build or rebuild the image (alias: rebuild)
@@ -1114,6 +1212,8 @@ def main(argv: list[str]) -> None:
         cmd_init(rest)
     elif cmd == "list":
         cmd_list()
+    elif cmd == "df":
+        cmd_df()
     elif cmd == "rm":
         cmd_rm(rest)
     elif cmd == "stop":

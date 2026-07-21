@@ -9,7 +9,7 @@ A container for safer vibecoding. Runs [opencode](https://opencode.ai) in a reus
 An autonomous agent runs shell commands and edits files with your real credentials. A container bounds the blast radius:
 
 - **Filesystem scope.** The agent sees only the bind-mounted workspace, not your whole home directory or other projects.
-- **Credential exposure is bounded.** Host auth is mounted read-only, private SSH keys are not mounted, and only specific API key env vars are forwarded at exec time. Network is enabled, so the agent can still exfiltrate what it can read; see [Security details](SECURITY.md).
+- **Credential exposure is bounded.** Host auth is mounted read-only, private SSH keys are not mounted, and only specific API key env vars are forwarded at exec time. Network is enabled, so the agent can still exfiltrate what it can read.
 - **`sudo` without host risk.** Passwordless sudo inside the container maps to your unprivileged host user under rootless podman, not real root.
 - **Git hooks and config are protected.** The agent cannot install hooks or alter git config that would fire on your host.
 - **Reversible.** Throw away a bad state with `clankbox rm`; the image is shared and rebuildable.
@@ -92,6 +92,7 @@ Manage containers:
 
 ```bash
 clankbox list              # all clankbox containers
+clankbox df                # disk space used by sandboxes
 clankbox stop              # stop this directory's container
 clankbox stop --all
 clankbox rm                # remove this directory's container
