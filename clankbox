@@ -6,15 +6,15 @@ from __future__ import annotations
 from contextlib import contextmanager
 import fcntl
 import hashlib
-import json
 import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Iterator, NoReturn
+from typing import NoReturn
 
 IMAGE = "localhost/clankbox:latest"
 LABEL_KEY = "clankbox"
@@ -22,35 +22,111 @@ LABEL_WORKDIR = "clankbox.workdir"
 LABEL_NVIDIA = "clankbox.nvidia"
 LABEL_X11 = "clankbox.x11"
 LABEL_SCHEMA = "clankbox.schema"
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 SCRIPT_PATH = Path(__file__).resolve()
 SCRIPT_DIR = SCRIPT_PATH.parent
 X11_SOCKET_DIR = Path("/tmp/.X11-unix")
 WSLG_DIR = Path("/mnt/wslg")
 
+# Pinned downloads. Bump hashes here, then reinstall the launcher copy.
+ARTIFACTS = {
+    "debian_image": (
+        "debian:bookworm-slim@"
+        "sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818"
+    ),
+    "node": {
+        "version": "v24.18.0",
+        "sha256": {
+            "x64": "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742",
+            "arm64": "58c9520501f6ae2b52d5b210444e24b9d0c029a58c5011b797bc1fe7105886f6",
+        },
+    },
+    "opencode": {
+        "version": "1.18.4",
+        "sha256": {
+            "x64": "bab463c3fb3224d388bb7cfad63f38703df9cf0be2cfd2ce8cb49d886b53a174",
+            "x64-baseline": (
+                "4d87e414607b77fef940256021e42fbbf37b8c62b06ced76b69e26c5dcbfbabc"
+            ),
+            "arm64": "eba87efba3976d533a24cca0316f8ef375b5f8e797c0a95c25ee919700b7ba35",
+        },
+    },
+    "nvidia_keyring": {
+        "version": "1.1-1",
+        "filename": "cuda-keyring_1.1-1_all.deb",
+        "sha256": {
+            "x86_64": "e7f219eab6fe4819cdb5c15b98233dc3420302d9c00883219cd3d896857cf48d",
+            "sbsa": "bf2f53b1a19259501119f732bdef2699f8c80c69a18e6a78dad78d67d96766dc",
+        },
+    },
+    "cuda_runtime_stream": "12-6",
+}
 
-def resource_root() -> Path:
-    """Directory containing Dockerfile and artifacts.json."""
-    env = os.environ.get("CLANKBOX_ROOT")
-    if env:
-        root = Path(env).expanduser().resolve()
-        if not (root / "Dockerfile").is_file():
-            die(f"CLANKBOX_ROOT={root} has no Dockerfile")
-        if not (root / "artifacts.json").is_file():
-            die(f"CLANKBOX_ROOT={root} has no artifacts.json")
-        return root
-    if (SCRIPT_DIR / "Dockerfile").is_file() and (
-        SCRIPT_DIR / "artifacts.json"
-    ).is_file():
-        return SCRIPT_DIR
-    die(
-        "cannot find clankbox resources (Dockerfile, artifacts.json). "
-        "Run from a full checkout, or set CLANKBOX_ROOT to that checkout"
-    )
+DOCKERFILE = f"""\
+FROM {ARTIFACTS["debian_image"]}
 
+ENV DEBIAN_FRONTEND=noninteractive \\
+    HOME=/home/clank \\
+    PATH=/usr/local/bin:/usr/bin:/bin:/home/clank/.local/bin \\
+    LANG=C.UTF-8 \\
+    LC_ALL=C.UTF-8 \\
+    OPENCODE_DISABLE_AUTOUPDATE=1
 
-def artifacts_path() -> Path:
-    return resource_root() / "artifacts.json"
+# Lean base tools. Node/npm are intentionally not from Debian (it pulls
+# webpack/eslint and balloons the image); clankbox provisions the official
+# Node binary into each container instead.
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    bash \\
+    bzip2 \\
+    ca-certificates \\
+    curl \\
+    file \\
+    findutils \\
+    g++ \\
+    gawk \\
+    git \\
+    grep \\
+    jq \\
+    less \\
+    make \\
+    nano \\
+    openssh-client \\
+    patch \\
+    procps \\
+    sudo \\
+    python3 \\
+    python3-pip \\
+    python3-venv \\
+    ripgrep \\
+    sed \\
+    tar \\
+    unzip \\
+    wget \\
+    xz-utils \\
+    zip \\
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# Node.js and opencode are provisioned by 'clankbox init' / 'clankbox update'
+# from versions and hashes embedded in the launcher.
+
+# UID 1000 is remapped to the host user via podman --userns keep-id:uid=1000,gid=1000
+# Passwordless sudo lets the agent install project packages inside the container;
+# rootless podman keeps this isolated from host root.
+RUN echo 'clank:x:1000:1000:clank:/home/clank:/bin/bash' >> /etc/passwd \\
+    && echo 'clank:x:1000:' >> /etc/group \\
+    && echo 'clank:!:19000:0:99999:7:::' >> /etc/shadow \\
+    && echo 'clank ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/clank \\
+    && chmod 0440 /etc/sudoers.d/clank \\
+    && mkdir -p /home/clank/.local/share/opencode \\
+        /home/clank/.config/opencode \\
+        /workspace \\
+    && chown -R 1000:1000 /home/clank /workspace
+
+WORKDIR /workspace
+USER clank
+
+CMD ["sleep", "infinity"]
+"""
 
 LOGO = """\
   ▓▓▓▓▓▓▓▓▓▓▓▓▓
@@ -65,7 +141,6 @@ LOGO = """\
   ▓▓▓▓▓▓▓▓▓▓▓▓▓
 """
 
-# Extra env vars to forward in addition to any matching *_API_KEY.
 PASSTHROUGH_ENV = (
     "GITHUB_TOKEN",
     "GH_TOKEN",
@@ -82,34 +157,21 @@ def passthrough_env() -> list[str]:
 
 
 def info(msg: str) -> None:
-    """Print a progress message for operations that may be slow."""
     print(f"clankbox: {msg}", file=sys.stderr, flush=True)
 
 
 def say(msg: str) -> None:
-    """Print a uniform result status line."""
     print(f"clankbox: {msg}")
 
 
 def print_logo() -> None:
-    """Print the clankbox logo to stderr."""
-    print(LOGO, file=sys.stderr)
+    if sys.stderr.isatty():
+        print(LOGO, file=sys.stderr)
 
 
 def die(msg: str, code: int = 1) -> NoReturn:
     print(f"clankbox: {msg}", file=sys.stderr)
     raise SystemExit(code)
-
-
-def load_artifacts() -> dict:
-    path = artifacts_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        die(f"cannot read {path}: {exc}")
-    except json.JSONDecodeError as exc:
-        die(f"invalid {path}: {exc}")
-    return data
 
 
 def need_podman() -> str:
@@ -185,15 +247,18 @@ def guard_workspace(directory: Path) -> None:
             f"({home}); cd into a project first"
         )
 
-    # Refuse to sandbox the launcher source tree or resource checkout.
-    for root in {SCRIPT_DIR, resource_root()}:
-        if directory == root or _is_under(root, directory):
-            die(
-                f"refusing to run in {directory}: this path contains the clankbox "
-                "launcher or resources; install a copy outside the workspace "
-                "(install -m 0755 ./clankbox ~/.local/bin/clankbox) and set "
-                "CLANKBOX_ROOT to the checkout if needed"
-            )
+    # Refuse to sandbox the launcher source tree when running from a checkout.
+    if directory == SCRIPT_DIR or _is_under(SCRIPT_DIR, directory):
+        if (SCRIPT_DIR / "clankbox").exists() or SCRIPT_PATH.name == "clankbox":
+            # Only refuse when this looks like the project checkout, not ~/.local/bin.
+            if (SCRIPT_DIR / "README.md").is_file() or (
+                SCRIPT_DIR / "Dockerfile"
+            ).is_file():
+                die(
+                    f"refusing to run in {directory}: this path contains the "
+                    "clankbox source tree; install a copy outside the workspace "
+                    "(install -m 0755 ./clankbox ~/.local/bin/clankbox)"
+                )
 
     uid = os.getuid()
     xdg_runtime = Path(
@@ -253,7 +318,6 @@ def state_directory() -> Path:
 
 
 def lock_directory() -> Path:
-    """Return a private, persistent location for process coordination locks."""
     directory = state_directory() / "locks"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     directory.chmod(0o700)
@@ -261,7 +325,6 @@ def lock_directory() -> Path:
 
 
 def empty_ro_file() -> Path:
-    """Host file used as a read-only empty placeholder mount source."""
     path = state_directory() / "empty"
     if not path.exists():
         path.write_bytes(b"")
@@ -269,26 +332,8 @@ def empty_ro_file() -> Path:
     return path
 
 
-def git_pointer_dir() -> Path:
-    """Private directory for generated container-side gitdir pointer files."""
-    directory = state_directory() / "git-pointers"
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    directory.chmod(0o700)
-    return directory
-
-
-def write_git_pointer(dest_key: str, gitdir: Path) -> Path:
-    """Write a gitfile that points at an absolute gitdir path for the container."""
-    digest = hashlib.sha256(dest_key.encode()).hexdigest()[:16]
-    path = git_pointer_dir() / f"{digest}.git"
-    path.write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
-    path.chmod(0o600)
-    return path
-
-
 @contextmanager
 def lock(name: str, mode: int):
-    """Hold an advisory lock until the enclosing operation finishes."""
     path = lock_directory() / name
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
@@ -302,14 +347,12 @@ def lock(name: str, mode: int):
 
 @contextmanager
 def image_lock():
-    """Serialize builds of the shared image."""
     with lock("image.lock", fcntl.LOCK_EX):
         yield
 
 
 @contextmanager
 def container_lock(directory: Path | None = None):
-    """Serialize lifecycle changes while allowing different workspaces to proceed."""
     global_mode = fcntl.LOCK_EX if directory is None else fcntl.LOCK_SH
     with lock("containers.lock", global_mode):
         if directory is None:
@@ -338,7 +381,6 @@ def _inspect_not_found(stderr: str, stdout: str) -> bool:
 
 
 def container_state(name: str) -> str | None:
-    """Return container status, None if absent. Die on podman errors."""
     result = run(
         ["podman", "inspect", "-f", "{{.State.Status}}", name],
         check=False,
@@ -354,7 +396,6 @@ def container_state(name: str) -> str | None:
 
 
 def container_label(name: str, key: str) -> str | None:
-    """Return a container label value, or None if missing. Die on inspect errors."""
     result = run(
         [
             "podman",
@@ -378,12 +419,7 @@ def container_label(name: str, key: str) -> str | None:
 
 
 def require_clankbox_container(name: str, directory: Path | None = None) -> str:
-    """Validate clankbox ownership labels. Schema may be legacy.
-
-    When directory is provided, require an exact workdir label match. When
-    omitted (bulk operations), only require that a workdir label exists and
-    that the container name matches the hash of that workdir.
-    """
+    """Validate ownership labels. Schema may be legacy."""
     state = container_state(name)
     if state is None:
         if directory is None:
@@ -412,7 +448,7 @@ def require_clankbox_container(name: str, directory: Path | None = None) -> str:
 
 
 def require_owned_container(name: str, directory: Path) -> str:
-    """Validate identity labels and current schema. Die if invalid/absent."""
+    """Validate identity labels and current schema."""
     state = require_clankbox_container(name, directory)
     schema = container_label(name, LABEL_SCHEMA)
     if schema != SCHEMA_VERSION:
@@ -429,16 +465,17 @@ def require_removable_container(name: str, directory: Path) -> str:
 
 
 def list_clankbox_names(*, all_containers: bool = True) -> list[str]:
-    args = [
-        "podman",
-        "ps",
-        "-a" if all_containers else "",
-        "--filter",
-        f"label={LABEL_KEY}=1",
-        "--format",
-        "{{.Names}}",
-    ]
-    args = [a for a in args if a]
+    args = ["podman", "ps"]
+    if all_containers:
+        args.append("-a")
+    args.extend(
+        [
+            "--filter",
+            f"label={LABEL_KEY}=1",
+            "--format",
+            "{{.Names}}",
+        ]
+    )
     result = run(args, check=False, capture=True)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
@@ -447,7 +484,6 @@ def list_clankbox_names(*, all_containers: bool = True) -> list[str]:
 
 
 def validated_clankbox_names(*, require_current_schema: bool) -> list[str]:
-    """Return owned clankbox container names after identity checks."""
     names = list_clankbox_names(all_containers=True)
     valid: list[str] = []
     for name in names:
@@ -464,28 +500,36 @@ def validated_clankbox_names(*, require_current_schema: bool) -> list[str]:
     return valid
 
 
-def build_image(extra_args: list[str] | None = None) -> None:
+def build_image() -> None:
     info(f"building image {IMAGE} (this can take a few minutes)")
-    root = resource_root()
-    run(
-        [
-            "podman",
-            "build",
-            "--pull=newer",
-            "-t",
-            IMAGE,
-            "-f",
-            str(root / "Dockerfile"),
-            str(root),
-            *(extra_args or []),
-        ]
-    )
+    # Secure private context so the embedded Dockerfile never lands at a fixed path.
+    ctx = tempfile.mkdtemp(prefix="clankbox.", dir="/tmp")
+    try:
+        os.chmod(ctx, 0o700)
+        dockerfile = Path(ctx) / "Dockerfile"
+        dockerfile.write_text(DOCKERFILE, encoding="utf-8")
+        os.chmod(dockerfile, 0o600)
+        run(
+            [
+                "podman",
+                "build",
+                "-t",
+                IMAGE,
+                "-f",
+                str(dockerfile),
+                ctx,
+            ]
+        )
+    finally:
+        shutil.rmtree(ctx, ignore_errors=True)
 
 
 def cmd_build(args: list[str]) -> None:
-    need_podman()
+    if wants_help(args):
+        die("usage: clankbox build", code=0)
     if args:
         die("build does not accept arguments (try 'clankbox help')")
+    need_podman()
     with image_lock():
         build_image()
 
@@ -498,7 +542,6 @@ def ensure_image() -> None:
 
 
 def is_wsl() -> bool:
-    """True when running under WSL (including WSL2 / WSLg)."""
     try:
         return "microsoft" in Path("/proc/version").read_text().lower()
     except OSError:
@@ -506,7 +549,6 @@ def is_wsl() -> bool:
 
 
 def host_xauthority() -> Path | None:
-    """Return the host Xauthority file path if it exists."""
     env_path = os.environ.get("XAUTHORITY")
     if env_path:
         path = Path(env_path)
@@ -519,20 +561,16 @@ def host_xauthority() -> Path | None:
 
 
 def display_uses_unix_socket(display: str) -> bool:
-    """True for DISPLAY values that talk to a local X11 unix socket."""
     return display.startswith(":") or display.startswith("unix:")
 
 
 def require_x11_host() -> str:
-    """Validate host X11 setup; return DISPLAY value."""
     display = os.environ.get("DISPLAY")
     if not display:
         die(
             "DISPLAY is not set. Start an X server (or WSLg), or ssh -Y, and "
             "export DISPLAY before 'clankbox init --x11'"
         )
-    # Local/WSLg unix sockets need /tmp/.X11-unix. SSH -Y uses TCP to
-    # localhost and is handled via --network=host (no socket required).
     if display_uses_unix_socket(display) and not X11_SOCKET_DIR.is_dir():
         die(
             f"X11 socket directory {X11_SOCKET_DIR} not found for DISPLAY={display}. "
@@ -543,7 +581,6 @@ def require_x11_host() -> str:
 
 
 def x11_exec_env_args() -> list[str]:
-    """podman exec -e args so the guest sees the current host display."""
     args: list[str] = []
     if display := os.environ.get("DISPLAY"):
         args.extend(["-e", f"DISPLAY={display}"])
@@ -553,7 +590,6 @@ def x11_exec_env_args() -> list[str]:
 
 
 def sync_xauthority(name: str) -> None:
-    """Copy the host Xauthority cookie file into the container if present."""
     xauth = host_xauthority()
     if xauth is None:
         return
@@ -578,352 +614,97 @@ def init_features_suffix(*, nvidia: bool, x11: bool) -> str:
     return " with " + " and ".join(parts)
 
 
-def _reject_symlink(path: Path, kind: str) -> None:
-    try:
-        st = path.lstat()
-    except OSError as exc:
-        die(f"cannot stat {kind} path {path}: {exc}")
-    if stat.S_ISLNK(st.st_mode):
-        die(f"refusing symlink {kind} path {path}")
-
-
-def _parse_gitfile(path: Path) -> Path:
-    """Parse a gitdir pointer file and return the resolved git directory."""
-    _reject_symlink(path, "gitfile")
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError as exc:
-        die(f"cannot read gitfile {path}: {exc}")
-    if not text.lower().startswith("gitdir:"):
-        die(f"unrecognized gitfile format in {path}")
-    target = text.split(":", 1)[1].strip()
-    if not target or ":" in target:
-        die(f"invalid gitdir target in {path}")
-    raw = Path(target)
-    resolved = (path.parent / raw).resolve() if not raw.is_absolute() else raw.resolve()
-    if ":" in str(resolved):
-        die(f"gitdir path contains ':': {resolved}")
-    return resolved
-
-
-def _read_commondir(gitdir: Path) -> Path | None:
-    commondir = gitdir / "commondir"
-    try:
-        st = commondir.lstat()
-    except OSError:
-        return None
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-        die(f"refusing unsafe commondir at {commondir}")
-    text = commondir.read_text(encoding="utf-8", errors="replace").strip()
-    if not text:
-        return None
-    raw = Path(text)
-    resolved = (gitdir / raw).resolve() if not raw.is_absolute() else raw.resolve()
-    if ":" in str(resolved):
-        die(f"commondir path contains ':': {resolved}")
-    return resolved
-
-
-def _is_gitdir(path: Path) -> bool:
-    try:
-        st = path.lstat()
-    except OSError:
-        return False
-    if not stat.S_ISDIR(st.st_mode):
-        return False
-    # A gitdir has HEAD plus objects or refs.
-    if not (path / "HEAD").exists():
-        return False
-    return (path / "objects").exists() or (path / "refs").exists() or (
-        path / "commondir"
-    ).exists()
-
-
-def _iter_module_gitdirs(modules_root: Path) -> Iterator[Path]:
-    if not modules_root.is_dir():
-        return
-    for dirpath, dirnames, _filenames in os.walk(modules_root, followlinks=False):
-        current = Path(dirpath)
-        if _is_gitdir(current):
-            yield current
-            # Still walk nested modules under this gitdir.
-            continue
-        # Prune obvious non-metadata dirs for speed.
-        dirnames[:] = [d for d in dirnames if d not in {".", ".."}]
-
-
 def _ro_bind(host: Path, dest: str) -> list[str]:
-    # Shared label (:z) so multiple clankbox containers can reuse placeholders
-    # and shared Git admin mounts without private SELinux relabel conflicts.
     return ["-v", f"{host}:{dest}:ro,z"]
 
 
-def _rw_bind(host: Path, dest: str) -> list[str]:
-    return ["-v", f"{host}:{dest}:rw,z"]
-
-
-def _ro_file_or_empty(host: Path, dest: str) -> list[str]:
-    if host.is_file() and not host.is_symlink():
-        return _ro_bind(host, dest)
-    return _ro_bind(empty_ro_file(), dest)
-
-
-def _protect_gitdir(gitdir: Path, dest_prefix: str) -> list[str]:
-    """Mount executable git metadata read-only under dest_prefix."""
+def _protect_gitdir(git_dir: Path) -> list[str]:
+    """Protect executable Git metadata for a normal .git directory."""
     args: list[str] = []
-    hooks = gitdir / "hooks"
+    hooks = git_dir / "hooks"
     if hooks.is_dir() and not hooks.is_symlink():
-        args.extend(_ro_bind(hooks, f"{dest_prefix}/hooks"))
+        args.extend(_ro_bind(hooks, "/workspace/.git/hooks"))
     else:
-        args.extend(["--mount", f"type=tmpfs,destination={dest_prefix}/hooks"])
-    args.extend(_ro_file_or_empty(gitdir / "config", f"{dest_prefix}/config"))
-    args.extend(
-        _ro_file_or_empty(gitdir / "config.worktree", f"{dest_prefix}/config.worktree")
-    )
-    info_dir = gitdir / "info"
+        args.extend(["--mount", "type=tmpfs,destination=/workspace/.git/hooks"])
+
+    for name in ("config", "config.worktree"):
+        path = git_dir / name
+        if path.is_file() and not path.is_symlink():
+            args.extend(_ro_bind(path, f"/workspace/.git/{name}"))
+        else:
+            args.extend(_ro_bind(empty_ro_file(), f"/workspace/.git/{name}"))
+
+    info_dir = git_dir / "info"
     info_attrs = info_dir / "attributes"
     if info_attrs.is_file() and not info_attrs.is_symlink():
-        args.extend(_ro_bind(info_attrs, f"{dest_prefix}/info/attributes"))
+        args.extend(_ro_bind(info_attrs, "/workspace/.git/info/attributes"))
+    elif info_dir.is_dir() and not info_dir.is_symlink():
+        args.extend(_ro_bind(empty_ro_file(), "/workspace/.git/info/attributes"))
     else:
-        # Prevent creating host-visible attributes whether or not info/ exists.
-        if info_dir.is_dir() and not info_dir.is_symlink():
-            args.extend(_ro_bind(empty_ro_file(), f"{dest_prefix}/info/attributes"))
-        else:
-            args.extend(["--mount", f"type=tmpfs,destination={dest_prefix}/info"])
+        args.extend(["--mount", "type=tmpfs,destination=/workspace/.git/info"])
+
+    # Protect immediate and nested module gitdirs under .git/modules only.
+    modules = git_dir / "modules"
+    if modules.is_dir() and not modules.is_symlink():
+        for dirpath, dirnames, _filenames in os.walk(modules, followlinks=False):
+            current = Path(dirpath)
+            # Prune heavy Git content directories.
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in {"objects", "refs", "logs", "hooks", "info"}
+            ]
+            if not (current / "HEAD").exists():
+                continue
+            if not (
+                (current / "objects").exists()
+                or (current / "refs").exists()
+                or (current / "config").exists()
+            ):
+                continue
+            rel = current.relative_to(git_dir).as_posix()
+            dest = f"/workspace/.git/{rel}"
+            hooks_m = current / "hooks"
+            if hooks_m.is_dir() and not hooks_m.is_symlink():
+                args.extend(_ro_bind(hooks_m, f"{dest}/hooks"))
+            else:
+                args.extend(["--mount", f"type=tmpfs,destination={dest}/hooks"])
+            for name in ("config", "config.worktree"):
+                path = current / name
+                if path.is_file() and not path.is_symlink():
+                    args.extend(_ro_bind(path, f"{dest}/{name}"))
+                else:
+                    args.extend(_ro_bind(empty_ro_file(), f"{dest}/{name}"))
     return args
 
 
-def _gitfile_text(path: Path) -> str:
-    _reject_symlink(path, "gitfile")
-    try:
-        return path.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError as exc:
-        die(f"cannot read gitfile {path}: {exc}")
-
-
-def _gitfile_raw_target(path: Path) -> str:
-    text = _gitfile_text(path)
-    if not text.lower().startswith("gitdir:"):
-        die(f"unrecognized gitfile format in {path}")
-    target = text.split(":", 1)[1].strip()
-    if not target or ":" in target:
-        die(f"invalid gitdir target in {path}")
-    return target
-
-
-def _worktree_gitdir_backlink_ok(gitdir: Path, workspace: Path) -> bool:
-    """True if gitdir looks like a linked worktree for this workspace."""
-    gitdir_file = gitdir / "gitdir"
-    try:
-        st = gitdir_file.lstat()
-    except OSError:
-        return False
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-        return False
-    text = gitdir_file.read_text(encoding="utf-8", errors="replace").strip()
-    if not text:
-        return False
-    raw = Path(text)
-    # gitdir files usually point at <worktree>/.git
-    pointed = (gitdir / raw).resolve() if not raw.is_absolute() else raw.resolve()
-    expected = (workspace / ".git").resolve()
-    return pointed == expected
-
-
-def _path_has_git_admin(path: Path, admin_name: str) -> bool:
-    """True if path is under a `.git/<admin_name>/...` hierarchy."""
-    parts = path.resolve().parts
-    for i, part in enumerate(parts):
-        if part == admin_name and i > 0 and parts[i - 1] == ".git":
-            return True
-    return False
-
-
-def _allowed_external_gitdir(
-    target: Path, *, workspace: Path, primary_git: Path | None
-) -> bool:
-    """Allow only expected module/worktree metadata outside the workspace."""
-    if primary_git is not None and primary_git.is_dir():
-        modules = (primary_git / "modules").resolve()
-        if _is_under(target, modules) or target == modules:
-            return True
-        worktrees = (primary_git / "worktrees").resolve()
-        if _is_under(target, worktrees) or target == worktrees:
-            return _worktree_gitdir_backlink_ok(target, workspace)
-        # Do not accept arbitrary other repos once the primary gitdir is known.
-        return False
-    # Workspace-root gitfile (submodule checkout or linked worktree).
-    if _path_has_git_admin(target, "modules"):
-        return True
-    if _path_has_git_admin(target, "worktrees"):
-        return _worktree_gitdir_backlink_ok(target, workspace)
-    return _worktree_gitdir_backlink_ok(target, workspace)
-
-
-def _mount_external_gitdir(
-    args: list[str],
-    protected_gitdirs: list[tuple[Path, str]],
-    gitdir: Path,
-    *,
-    workspace: Path,
-    primary_git: Path | None,
-    allow_unvalidated_common: bool = False,
-) -> None:
-    if ":" in str(gitdir):
-        die(f"gitdir path contains ':': {gitdir}")
-    if _is_under(gitdir, workspace):
-        dest = f"/workspace/{gitdir.relative_to(workspace).as_posix()}"
-        protected_gitdirs.append((gitdir, dest))
-        return
-    if not _allowed_external_gitdir(
-        gitdir, workspace=workspace, primary_git=primary_git
-    ):
-        if allow_unvalidated_common:
-            # Common dir of an already-validated worktree gitdir.
-            pass
-        else:
-            die(
-                f"refusing to mount unexpected external gitdir {gitdir}; "
-                "only primary module/worktree metadata is allowed"
-            )
-    args.extend(_rw_bind(gitdir, str(gitdir)))
-    protected_gitdirs.append((gitdir, str(gitdir)))
-
-
-def _pointer_mount_args(dest: str, gitdir: Path) -> list[str]:
-    """Mount a generated absolute gitfile so relative host pointers work."""
-    pointer = write_git_pointer(dest, gitdir)
-    return _ro_bind(pointer, dest)
-
-
 def git_mount_args(directory: Path) -> list[str]:
-    """Build podman mount args that protect host-executed Git metadata."""
-    args: list[str] = []
+    """Protect host-executed Git metadata when the workspace root is a normal repo.
+
+    Git is optional. Linked worktrees and submodule checkouts (`.git` file) are
+    unsupported for in-container Git; the workspace still mounts normally.
+    """
     git_path = directory / ".git"
     try:
         st = git_path.lstat()
     except OSError:
-        args.extend(["--mount", "type=tmpfs,destination=/workspace/.git"])
-        return args
+        # Non-git workspace: hide any agent-created .git from the host.
+        return ["--mount", "type=tmpfs,destination=/workspace/.git"]
 
     if stat.S_ISLNK(st.st_mode):
         die(f"refusing symlink .git at {git_path}")
 
-    protected_gitdirs: list[tuple[Path, str]] = []
-    primary_git: Path | None = None
-
     if stat.S_ISREG(st.st_mode):
-        # Linked worktree or submodule checkout used as the workspace root.
-        gitdir = _parse_gitfile(git_path)
-        if not _is_gitdir(gitdir):
-            die(f"gitdir {gitdir} from {git_path} is not a valid git directory")
-        if not _is_under(gitdir, directory) and not _allowed_external_gitdir(
-            gitdir, workspace=directory, primary_git=None
-        ):
-            die(
-                f"refusing to mount unexpected external gitdir {gitdir}; "
-                "only linked worktrees and module metadata are allowed"
-            )
-        # Always use a generated absolute pointer so relative gitdir: paths work.
-        args.extend(_pointer_mount_args("/workspace/.git", gitdir))
-        _mount_external_gitdir(
-            args,
-            protected_gitdirs,
-            gitdir,
-            workspace=directory,
-            primary_git=None,
-            allow_unvalidated_common=True,
+        die(
+            f"{directory} uses a .git file (linked worktree or submodule checkout). "
+            "clankbox supports normal repository roots with a .git directory, "
+            "or non-git directories. cd to the main checkout, or use a non-git path."
         )
-        common = _read_commondir(gitdir)
-        if common is not None:
-            if not _is_gitdir(common):
-                die(f"commondir {common} is not a valid git directory")
-            if common != gitdir:
-                _mount_external_gitdir(
-                    args,
-                    protected_gitdirs,
-                    common,
-                    workspace=directory,
-                    primary_git=None,
-                    allow_unvalidated_common=True,
-                )
-                primary_git = common if common.is_dir() else None
-            else:
-                primary_git = gitdir
-        else:
-            primary_git = gitdir if gitdir.is_dir() else None
-    elif stat.S_ISDIR(st.st_mode):
-        primary_git = git_path
-        protected_gitdirs.append((git_path, "/workspace/.git"))
-        modules = git_path / "modules"
-        for mod in _iter_module_gitdirs(modules):
-            rel = mod.relative_to(git_path)
-            protected_gitdirs.append((mod, f"/workspace/.git/{rel.as_posix()}"))
-    else:
+
+    if not stat.S_ISDIR(st.st_mode):
         die(f"unsupported .git type at {git_path}")
 
-    # Workspace-side submodule gitfiles (nested checkouts).
-    for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
-        # Do not descend into the primary .git directory.
-        if Path(dirpath) == directory and ".git" in dirnames:
-            dirnames.remove(".git")
-        if ".git" not in filenames:
-            continue
-        gitfile = Path(dirpath) / ".git"
-        if gitfile == git_path:
-            continue
-        try:
-            gst = gitfile.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(gst.st_mode):
-            continue
-        rel = gitfile.relative_to(directory).as_posix()
-        dest = f"/workspace/{rel}"
-        target = _parse_gitfile(gitfile)
-        if not _is_gitdir(target):
-            die(f"gitdir {target} from {gitfile} is not a valid git directory")
-        # Generated absolute pointer; never mount attacker-controlled relative text.
-        args.extend(_pointer_mount_args(dest, target))
-        if _is_under(target, directory):
-            # In-workspace module metadata is already visible via the workspace mount.
-            protected_gitdirs.append(
-                (target, f"/workspace/{target.relative_to(directory).as_posix()}")
-            )
-        else:
-            if primary_git is None or not _allowed_external_gitdir(
-                target, workspace=directory, primary_git=primary_git
-            ):
-                die(
-                    f"refusing to mount unexpected external gitdir {target} "
-                    f"from {gitfile}; only primary module/worktree metadata is allowed"
-                )
-            args.extend(_rw_bind(target, str(target)))
-            protected_gitdirs.append((target, str(target)))
-            common = _read_commondir(target)
-            if (
-                common is not None
-                and _is_gitdir(common)
-                and not _is_under(common, directory)
-                and common != target
-            ):
-                # Common dir must be the primary gitdir already in use.
-                if primary_git is not None and common.resolve() == primary_git.resolve():
-                    args.extend(_rw_bind(common, str(common)))
-                    protected_gitdirs.append((common, str(common)))
-                else:
-                    die(
-                        f"refusing unexpected commondir {common} from {target}"
-                    )
-
-    seen: set[str] = set()
-    for gitdir, dest in protected_gitdirs:
-        key = f"{gitdir}->{dest}"
-        if key in seen:
-            continue
-        seen.add(key)
-        args.extend(_protect_gitdir(gitdir, dest))
-    return args
+    return _protect_gitdir(git_path)
 
 
 def create_container(
@@ -979,8 +760,6 @@ def create_container(
         )
     if x11:
         assert display is not None
-        # Host network so SSH -Y DISPLAY=localhost:N reaches the host sshd
-        # X11 proxy (bridge netns would make localhost the container itself).
         args.extend(
             [
                 "--network",
@@ -996,7 +775,6 @@ def create_container(
         if is_wsl() and WSLG_DIR.is_dir():
             args.extend(["-v", f"{WSLG_DIR}:{WSLG_DIR}:ro"])
         if host_xauthority() is not None:
-            # Cookie file is copied in after start (path can change per ssh -Y).
             args.extend(["-e", "XAUTHORITY=/home/clank/.Xauthority"])
     if colorterm := os.environ.get("COLORTERM"):
         args.extend(["-e", f"COLORTERM={colorterm}"])
@@ -1043,8 +821,12 @@ def container_has_x11(name: str) -> bool:
     return container_label(name, LABEL_X11) == "1"
 
 
+PROVISION_MARKER = "/home/clank/.clankbox-provisioned"
+NVIDIA_PROVISION_MARKER = "/home/clank/.clankbox-nvidia-provisioned"
+X11_PROVISION_MARKER = "/home/clank/.clankbox-x11-provisioned"
+
+
 def is_provisioned(name: str) -> bool:
-    """True if the container has completed provisioning (Node, opencode)."""
     return (
         run(
             ["podman", "exec", name, "test", "-f", PROVISION_MARKER],
@@ -1056,7 +838,6 @@ def is_provisioned(name: str) -> bool:
 
 
 def is_nvidia_provisioned(name: str) -> bool:
-    """True if NVIDIA runtime libs have been provisioned in the container."""
     return (
         run(
             ["podman", "exec", name, "test", "-f", NVIDIA_PROVISION_MARKER],
@@ -1068,7 +849,6 @@ def is_nvidia_provisioned(name: str) -> bool:
 
 
 def is_x11_provisioned(name: str) -> bool:
-    """True if X11 libraries have been provisioned in the container."""
     return (
         run(
             ["podman", "exec", name, "test", "-f", X11_PROVISION_MARKER],
@@ -1079,486 +859,9 @@ def is_x11_provisioned(name: str) -> bool:
     )
 
 
-def provision(name: str) -> None:
-    """Install/update in-container software. Raises if provisioning fails."""
-    info("provisioning tools (this can take a minute)")
-    run(
-        [
-            "podman",
-            "exec",
-            "-w",
-            "/workspace",
-            name,
-            "bash",
-            "-lc",
-            build_provision_script(),
-        ]
-    )
-
-
-def provision_nvidia(name: str) -> None:
-    """Install CUDA runtime libraries and verify GPU access."""
-    info("provisioning NVIDIA CUDA runtime libraries")
-    run(
-        [
-            "podman",
-            "exec",
-            "-w",
-            "/workspace",
-            name,
-            "bash",
-            "-lc",
-            build_nvidia_provision_script(),
-        ]
-    )
-
-
-def provision_x11(name: str) -> None:
-    """Install basic X11 libraries/apps and verify display access."""
-    info("provisioning X11 libraries")
-    sync_xauthority(name)
-    run(
-        [
-            "podman",
-            "exec",
-            "-w",
-            "/workspace",
-            *x11_exec_env_args(),
-            name,
-            "bash",
-            "-lc",
-            X11_PROVISION_SCRIPT,
-        ]
-    )
-
-
-def copy_auth_if_present(name: str) -> None:
-    """Copy staged auth.json to the writable location if the host file was mounted."""
-    result = run(
-        ["podman", "exec", name, "test", "-f", "/tmp/clankbox-auth.json"],
-        check=False,
-        quiet=True,
-    )
-    if result.returncode != 0:
-        return
-    result = run(
-        [
-            "podman",
-            "exec",
-            name,
-            "cp",
-            "/tmp/clankbox-auth.json",
-            "/home/clank/.local/share/opencode/auth.json",
-        ],
-        check=False,
-        capture=True,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        die(f"failed to copy auth.json into {name}\n{detail}")
-
-
-def start_container(name: str, *, nvidia: bool = False) -> None:
-    """Start a container; surface a clear error when GPU/CDI setup is missing."""
-    result = run(["podman", "start", name], check=False, capture=True)
-    if result.returncode == 0:
-        return
-    detail = (result.stderr or result.stdout or "").strip()
-    if nvidia or container_has_nvidia(name):
-        die(
-            "failed to start container with GPU access. "
-            "Host needs an NVIDIA driver and nvidia-container-toolkit "
-            f"with CDI (device nvidia.com/gpu=all).\n{detail}"
-        )
-    die(f"failed to start container {name}\n{detail}")
-
-
-def ensure_running(name: str, directory: Path) -> None:
-    """Validate ownership and ensure container is running and provisioned."""
-    state = require_owned_container(name, directory)
-    if state == "paused":
-        die(f"container {name} is paused; run 'podman unpause {name}' or recreate it")
-    if state not in ("running", "created", "exited", "stopped"):
-        die(f"container {name} is in unsupported state {state!r}")
-    if state != "running":
-        info(f"starting container {name}")
-        start_container(name)
-        copy_auth_if_present(name)
-    if container_has_x11(name):
-        sync_xauthority(name)
-    if not is_provisioned(name):
-        provision(name)
-    if container_has_nvidia(name) and not is_nvidia_provisioned(name):
-        provision_nvidia(name)
-    if container_has_x11(name) and not is_x11_provisioned(name):
-        provision_x11(name)
-
-
-def require_no_extra_args(args: list[str], command: str) -> None:
-    if args:
-        die(f"{command} does not accept arguments (try 'clankbox help')")
-
-
-def parse_all_flag(args: list[str], command: str) -> bool:
-    if not args:
-        return False
-    if args in (["--all"], ["-a"]):
-        return True
-    if args in (["--help"], ["-h"]):
-        die(f"usage: clankbox {command} [--all|-a]", code=0)
-    die(f"unknown {command} option {' '.join(args)!r} (try 'clankbox help')")
-
-
-def cmd_init(args: list[str]) -> None:
-    """Create and provision a container for this directory (idempotent)."""
-    nvidia = False
-    x11 = False
-    for arg in args:
-        if arg == "--nvidia":
-            nvidia = True
-        elif arg == "--x11":
-            x11 = True
-        elif arg in ("--help", "-h"):
-            die(
-                "usage: clankbox init [--nvidia] [--x11]",
-                code=0,
-            )
-        else:
-            die(f"unknown init option {arg!r} (try 'clankbox help')")
-
-    need_podman()
-    directory = workdir()
-    guard_workspace(directory)
-    ensure_image()
-    name = container_name(directory)
-    with container_lock(directory):
-        state = container_state(name)
-        if state is None:
-            info(f"no container for {directory}, setting one up")
-            create_container(name, directory, nvidia=nvidia, x11=x11)
-            info("starting container")
-            start_result = run(["podman", "start", name], check=False, capture=True)
-            if start_result.returncode != 0:
-                detail = (start_result.stderr or start_result.stdout or "").strip()
-                run(["podman", "rm", "-f", name], check=False, quiet=True)
-                if nvidia:
-                    die(
-                        "failed to start container with GPU access. "
-                        "Host needs an NVIDIA driver and nvidia-container-toolkit "
-                        f"with CDI (device nvidia.com/gpu=all).\n{detail}"
-                    )
-                if x11:
-                    die(
-                        "failed to start container with X11 access. "
-                        "Host needs a working X server, WSLg, or ssh -Y "
-                        f"with DISPLAY set.\n{detail}"
-                    )
-                die(f"failed to start container {name}\n{detail}")
-            copy_auth_if_present(name)
-            if x11:
-                sync_xauthority(name)
-            provision(name)
-            if nvidia:
-                provision_nvidia(name)
-            if x11:
-                provision_x11(name)
-            say(
-                f"initialized {name}"
-                + init_features_suffix(nvidia=nvidia, x11=x11)
-            )
-            return
-
-        # Existing container: must be owned and match schema.
-        require_owned_container(name, directory)
-        has_nvidia = container_has_nvidia(name)
-        has_x11 = container_has_x11(name)
-        if nvidia and not has_nvidia:
-            die(
-                f"{name} already exists without GPU access; "
-                f"run 'clankbox rm' then 'clankbox init --nvidia'"
-            )
-        if x11 and not has_x11:
-            die(
-                f"{name} already exists without X11 access; "
-                f"run 'clankbox rm' then 'clankbox init --x11'"
-            )
-
-        if state == "paused":
-            die(f"container {name} is paused; run 'podman unpause {name}' or recreate it")
-        if state != "running":
-            info(f"starting container {name}")
-            start_container(name, nvidia=has_nvidia)
-            copy_auth_if_present(name)
-
-        if has_x11:
-            sync_xauthority(name)
-
-        did_work = False
-        if not is_provisioned(name):
-            provision(name)
-            did_work = True
-        if has_nvidia and not is_nvidia_provisioned(name):
-            provision_nvidia(name)
-            did_work = True
-        if has_x11 and not is_x11_provisioned(name):
-            provision_x11(name)
-            did_work = True
-        if did_work:
-            say(
-                f"initialized {name}"
-                + init_features_suffix(nvidia=has_nvidia, x11=has_x11)
-            )
-            return
-        say(f"already initialized ({name})")
-
-
-def exec_in(name: str, command: list[str]) -> None:
-    args = [
-        "podman",
-        "exec",
-        "-i",
-        "-w",
-        "/workspace",
-        "-e",
-        f"TERM={os.environ.get('TERM', 'xterm-256color')}",
-        "-e",
-        "LANG=C.UTF-8",
-        "-e",
-        "LC_ALL=C.UTF-8",
-    ]
-    if sys.stdin.isatty() and sys.stdout.isatty():
-        args.insert(2, "-t")
-    if container_has_x11(name):
-        sync_xauthority(name)
-        args.extend(x11_exec_env_args())
-    for key in passthrough_env():
-        if os.environ.get(key):
-            args.extend(["-e", key])
-    args.extend([name, *command])
-    os.execvp("podman", args)
-
-
-def cmd_list(args: list[str]) -> None:
-    need_podman()
-    require_no_extra_args(args, "list")
-    result = run(
-        [
-            "podman",
-            "ps",
-            "-a",
-            "--filter",
-            f"label={LABEL_KEY}=1",
-            "--format",
-            "{{.Names}}\t{{.Status}}",
-        ],
-        check=False,
-        capture=True,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        die(f"failed to list clankbox containers\n{detail}")
-    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
-    if not lines:
-        say("no clankbox containers")
-        return
-    print(f"{'NAMES':<24} {'STATUS':<28} WORKDIR")
-    for line in lines:
-        name, _, status = line.partition("\t")
-        work = container_label(name, LABEL_WORKDIR) or ""
-        # Sanitize control chars in display output.
-        work_disp = _CONTROL_CHARS.sub("?", work)
-        print(f"{name:<24} {status:<28} {work_disp}")
-
-
-def human_size(num: int | float) -> str:
-    """Format a byte count like 1.5G / 530M (podman-style, base 1000)."""
-    n = float(num)
-    for unit, suffix in (
-        (1_000_000_000_000, "T"),
-        (1_000_000_000, "G"),
-        (1_000_000, "M"),
-        (1_000, "K"),
-    ):
-        if n >= unit:
-            value = n / unit
-            if value >= 100:
-                return f"{value:.0f}{suffix}"
-            if value >= 10:
-                return f"{value:.1f}{suffix}"
-            return f"{value:.2f}{suffix}"
-    return f"{int(n)}B"
-
-
-def cmd_df(args: list[str]) -> None:
-    """Show disk space used by clankbox sandboxes (container RW layers + image)."""
-    need_podman()
-    require_no_extra_args(args, "df")
-    names = list_clankbox_names(all_containers=True)
-
-    image_size = 0
-    image_inspect = run(
-        ["podman", "image", "inspect", "-f", "{{.Size}}", IMAGE],
-        check=False,
-        capture=True,
-    )
-    if image_inspect.returncode == 0:
-        raw = (image_inspect.stdout or "").strip()
-        if raw.isdigit():
-            image_size = int(raw)
-    elif not _inspect_not_found(image_inspect.stderr or "", image_inspect.stdout or ""):
-        detail = (image_inspect.stderr or image_inspect.stdout or "").strip()
-        die(f"failed to inspect image {IMAGE}\n{detail}")
-
-    if not names and image_size == 0:
-        say("no clankbox containers or image")
-        return
-
-    total_rw = 0
-    if names:
-        print(f"{'NAMES':<24} {'SIZE':>8} {'VIRTUAL':>8}  WORKDIR")
-        for name in names:
-            inspect = run(
-                [
-                    "podman",
-                    "inspect",
-                    "--size",
-                    "-f",
-                    (
-                        "{{.SizeRw}}\t{{.SizeRootFs}}\t"
-                        f'{{{{index .Config.Labels "{LABEL_WORKDIR}"}}}}'
-                    ),
-                    name,
-                ],
-                check=False,
-                capture=True,
-            )
-            size_rw = 0
-            size_root = 0
-            work = ""
-            if inspect.returncode != 0:
-                detail = (inspect.stderr or inspect.stdout or "").strip()
-                die(f"failed to inspect {name}\n{detail}")
-            parts = (inspect.stdout or "").strip().split("\t")
-            if len(parts) >= 1 and parts[0] not in ("", "<nil>") and parts[0].lstrip("-").isdigit():
-                size_rw = int(parts[0])
-            if len(parts) >= 2 and parts[1] not in ("", "<nil>") and parts[1].lstrip("-").isdigit():
-                size_root = int(parts[1])
-            if len(parts) >= 3:
-                work = _CONTROL_CHARS.sub("?", parts[2])
-            total_rw += max(size_rw, 0)
-            print(
-                f"{name:<24} {human_size(max(size_rw, 0)):>8} "
-                f"{human_size(max(size_root, 0)):>8}  {work}"
-            )
-        print()
-
-    print(f"{'ITEM':<32} {'SIZE':>8}")
-    if image_size:
-        print(f"{IMAGE:<32} {human_size(image_size):>8}")
-    if names:
-        print(f"{'containers (writable)':<32} {human_size(total_rw):>8}")
-        print(f"{'total (image + writable)':<32} {human_size(image_size + total_rw):>8}")
-
-
-def cmd_rm(args: list[str]) -> None:
-    need_podman()
-    all_flag = parse_all_flag(args, "rm")
-    if all_flag:
-        with container_lock():
-            names = validated_clankbox_names(require_current_schema=False)
-            if not names:
-                say("no clankbox containers to remove")
-                return
-            run(["podman", "rm", "-f", *names], quiet=True)
-            say(f"removed all clankbox containers ({len(names)})")
-        return
-
-    directory = workdir()
-    name = container_name(directory)
-    with container_lock(directory):
-        require_removable_container(name, directory)
-        run(["podman", "rm", "-f", name], quiet=True)
-        say(f"removed {name} ({directory})")
-
-
-def cmd_stop(args: list[str]) -> None:
-    need_podman()
-    all_flag = parse_all_flag(args, "stop")
-    if all_flag:
-        with container_lock():
-            names = validated_clankbox_names(require_current_schema=True)
-            running: list[str] = []
-            for name in names:
-                if container_state(name) == "running":
-                    running.append(name)
-            if not running:
-                say("no running clankbox containers")
-                return
-            info(f"stopping {len(running)} container(s)")
-            run(["podman", "stop", *running], quiet=True)
-            say(f"stopped all running clankbox containers ({len(running)})")
-        return
-
-    directory = workdir()
-    name = container_name(directory)
-    with container_lock(directory):
-        state = require_owned_container(name, directory)
-        if state == "running":
-            info(f"stopping {name}")
-            run(["podman", "stop", name], quiet=True)
-            say(f"stopped {name}")
-        elif state == "paused":
-            die(f"{name} is paused; unpause or remove it")
-        else:
-            say(f"{name} is not running")
-
-
-def cmd_shell(args: list[str]) -> None:
-    need_podman()
-    directory = workdir()
-    guard_workspace(directory)
-    name = container_name(directory)
-    with container_lock(directory):
-        ensure_running(name, directory)
-    if args and args[0] == "--":
-        args = args[1:]
-    if not args:
-        exec_in(name, ["bash", "-l"])
-    else:
-        exec_in(name, ["bash", "-lc", 'exec "$@"', "bash", *args])
-
-
-def cmd_enter(args: list[str]) -> None:
-    need_podman()
-    directory = workdir()
-    guard_workspace(directory)
-    name = container_name(directory)
-    print_logo()
-    with container_lock(directory):
-        ensure_running(name, directory)
-    if not args:
-        exec_in(name, ["bash", "-lc", "exec opencode"])
-    else:
-        exec_in(name, ["bash", "-lc", 'exec opencode "$@"', "bash", *args])
-
-
-PROVISION_MARKER = "/home/clank/.clankbox-provisioned"
-NVIDIA_PROVISION_MARKER = "/home/clank/.clankbox-nvidia-provisioned"
-X11_PROVISION_MARKER = "/home/clank/.clankbox-x11-provisioned"
-
-
 def build_provision_script() -> str:
-    """Install pinned Node.js and opencode versions from artifacts.json."""
-    artifacts = load_artifacts()
-    node = artifacts["node"]
-    opencode = artifacts["opencode"]
-    node_version = node["version"]
-    node_x64 = node["sha256"]["x64"]
-    node_arm64 = node["sha256"]["arm64"]
-    oc_version = opencode["version"]
-    oc_x64 = opencode["sha256"]["x64"]
-    oc_x64_baseline = opencode["sha256"]["x64-baseline"]
-    oc_arm64 = opencode["sha256"]["arm64"]
+    node = ARTIFACTS["node"]
+    opencode = ARTIFACTS["opencode"]
     return f"""set -euo pipefail
 
 echo "clankbox: updating Debian packages"
@@ -1566,13 +869,13 @@ sudo apt-get update
 sudo apt-get upgrade -y
 sudo apt-get autoremove -y
 
-NODE_VERSION="{node_version}"
-NODE_SHA_X64="{node_x64}"
-NODE_SHA_ARM64="{node_arm64}"
-OPENCODE_VERSION="{oc_version}"
-OPENCODE_SHA_X64="{oc_x64}"
-OPENCODE_SHA_X64_BASELINE="{oc_x64_baseline}"
-OPENCODE_SHA_ARM64="{oc_arm64}"
+NODE_VERSION="{node["version"]}"
+NODE_SHA_X64="{node["sha256"]["x64"]}"
+NODE_SHA_ARM64="{node["sha256"]["arm64"]}"
+OPENCODE_VERSION="{opencode["version"]}"
+OPENCODE_SHA_X64="{opencode["sha256"]["x64"]}"
+OPENCODE_SHA_X64_BASELINE="{opencode["sha256"]["x64-baseline"]}"
+OPENCODE_SHA_ARM64="{opencode["sha256"]["arm64"]}"
 
 echo "clankbox: checking Node.js (pinned $NODE_VERSION)"
 CURRENT=$(node --version 2>/dev/null || echo "none")
@@ -1645,24 +948,20 @@ fi
 command -v opencode >/dev/null
 opencode --version
 
-touch /home/clank/.clankbox-provisioned
+touch {PROVISION_MARKER}
 echo "clankbox: done"
 """
 
 
 def build_nvidia_provision_script() -> str:
-    artifacts = load_artifacts()
-    stream = artifacts.get("cuda_runtime_stream", "12-6")
-    keyring = artifacts["nvidia_keyring"]
-    filename = keyring["filename"]
-    sha_x86 = keyring["sha256"]["x86_64"]
-    sha_sbsa = keyring["sha256"]["sbsa"]
+    keyring = ARTIFACTS["nvidia_keyring"]
+    stream = ARTIFACTS["cuda_runtime_stream"]
     return f"""set -euo pipefail
 
 CUDA_STREAM="{stream}"
-KEYRING_DEB="{filename}"
-KEYRING_SHA_X86_64="{sha_x86}"
-KEYRING_SHA_SBSA="{sha_sbsa}"
+KEYRING_DEB="{keyring["filename"]}"
+KEYRING_SHA_X86_64="{keyring["sha256"]["x86_64"]}"
+KEYRING_SHA_SBSA="{keyring["sha256"]["sbsa"]}"
 
 echo "clankbox: installing NVIDIA CUDA runtime libraries (${{CUDA_STREAM}})"
 ARCH=$(dpkg --print-architecture)
@@ -1691,29 +990,27 @@ if ! nvidia-smi; then
     exit 1
 fi
 
-touch /home/clank/.clankbox-nvidia-provisioned
+touch {NVIDIA_PROVISION_MARKER}
 echo "clankbox: NVIDIA provisioning done"
 """
 
 
-# Basic X11 client libraries for host display passthrough.
-# Keep the marker path in sync with X11_PROVISION_MARKER above.
-X11_PROVISION_SCRIPT = r"""set -euo pipefail
+X11_PROVISION_SCRIPT = f"""set -euo pipefail
 
 echo "clankbox: installing X11 libraries"
 sudo apt-get update
-sudo apt-get install -y --no-install-recommends \
-    x11-utils \
-    libx11-6 \
-    libxext6 \
-    libxrender1 \
-    libxtst6 \
-    libxi6 \
-    libxfixes3 \
+sudo apt-get install -y --no-install-recommends \\
+    x11-utils \\
+    libx11-6 \\
+    libxext6 \\
+    libxrender1 \\
+    libxtst6 \\
+    libxi6 \\
+    libxfixes3 \\
     fonts-dejavu-core
 
 echo "clankbox: verifying X11 display access (xdpyinfo)"
-if [ -z "${DISPLAY:-}" ]; then
+if [ -z "${{DISPLAY:-}}" ]; then
     echo "clankbox: DISPLAY is unset; skipping xdpyinfo (packages installed)" >&2
 else
     if ! xdpyinfo >/dev/null; then
@@ -1723,13 +1020,479 @@ else
     fi
 fi
 
-touch /home/clank/.clankbox-x11-provisioned
+touch {X11_PROVISION_MARKER}
 echo "clankbox: X11 provisioning done"
 """
 
 
+def provision(name: str) -> None:
+    info("provisioning tools (this can take a minute)")
+    run(
+        [
+            "podman",
+            "exec",
+            "-w",
+            "/workspace",
+            name,
+            "bash",
+            "-lc",
+            build_provision_script(),
+        ]
+    )
+
+
+def provision_nvidia(name: str) -> None:
+    info("provisioning NVIDIA CUDA runtime libraries")
+    run(
+        [
+            "podman",
+            "exec",
+            "-w",
+            "/workspace",
+            name,
+            "bash",
+            "-lc",
+            build_nvidia_provision_script(),
+        ]
+    )
+
+
+def provision_x11(name: str) -> None:
+    info("provisioning X11 libraries")
+    sync_xauthority(name)
+    run(
+        [
+            "podman",
+            "exec",
+            "-w",
+            "/workspace",
+            *x11_exec_env_args(),
+            name,
+            "bash",
+            "-lc",
+            X11_PROVISION_SCRIPT,
+        ]
+    )
+
+
+def copy_auth_if_present(name: str) -> None:
+    result = run(
+        ["podman", "exec", name, "test", "-f", "/tmp/clankbox-auth.json"],
+        check=False,
+        quiet=True,
+    )
+    if result.returncode != 0:
+        return
+    result = run(
+        [
+            "podman",
+            "exec",
+            name,
+            "cp",
+            "/tmp/clankbox-auth.json",
+            "/home/clank/.local/share/opencode/auth.json",
+        ],
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        die(f"failed to copy auth.json into {name}\n{detail}")
+
+
+def start_container(name: str, *, nvidia: bool = False) -> None:
+    result = run(["podman", "start", name], check=False, capture=True)
+    if result.returncode == 0:
+        return
+    detail = (result.stderr or result.stdout or "").strip()
+    if nvidia or container_has_nvidia(name):
+        die(
+            "failed to start container with GPU access. "
+            "Host needs an NVIDIA driver and nvidia-container-toolkit "
+            f"with CDI (device nvidia.com/gpu=all).\n{detail}"
+        )
+    die(f"failed to start container {name}\n{detail}")
+
+
+def ensure_running(name: str, directory: Path) -> None:
+    state = require_owned_container(name, directory)
+    if state == "paused":
+        die(f"container {name} is paused; run 'podman unpause {name}' or recreate it")
+    if state not in ("running", "created", "exited", "stopped"):
+        die(f"container {name} is in unsupported state {state!r}")
+    if state != "running":
+        info(f"starting container {name}")
+        start_container(name)
+        copy_auth_if_present(name)
+    if container_has_x11(name):
+        sync_xauthority(name)
+    if not is_provisioned(name):
+        provision(name)
+    if container_has_nvidia(name) and not is_nvidia_provisioned(name):
+        provision_nvidia(name)
+    if container_has_x11(name) and not is_x11_provisioned(name):
+        provision_x11(name)
+
+
+def wants_help(args: list[str]) -> bool:
+    return bool(args) and args[0] in ("-h", "--help", "help")
+
+
+def require_no_extra_args(args: list[str], command: str) -> None:
+    if wants_help(args):
+        die(f"usage: clankbox {command}", code=0)
+    if args:
+        die(f"{command} does not accept arguments (try 'clankbox help')")
+
+
+def parse_all_flag(args: list[str], command: str) -> bool:
+    if wants_help(args):
+        die(f"usage: clankbox {command} [--all|-a]", code=0)
+    if not args:
+        return False
+    if args in (["--all"], ["-a"]):
+        return True
+    die(f"unknown {command} option {' '.join(args)!r} (try 'clankbox help')")
+
+
+def cmd_init(args: list[str]) -> None:
+    if wants_help(args):
+        die("usage: clankbox init [--nvidia] [--x11]", code=0)
+    nvidia = False
+    x11 = False
+    for arg in args:
+        if arg == "--nvidia":
+            nvidia = True
+        elif arg == "--x11":
+            x11 = True
+        else:
+            die(f"unknown init option {arg!r} (try 'clankbox help')")
+
+    need_podman()
+    directory = workdir()
+    guard_workspace(directory)
+    ensure_image()
+    name = container_name(directory)
+    with container_lock(directory):
+        state = container_state(name)
+        if state is None:
+            info(f"no container for {directory}, setting one up")
+            create_container(name, directory, nvidia=nvidia, x11=x11)
+            info("starting container")
+            start_result = run(["podman", "start", name], check=False, capture=True)
+            if start_result.returncode != 0:
+                detail = (start_result.stderr or start_result.stdout or "").strip()
+                run(["podman", "rm", "-f", name], check=False, quiet=True)
+                if nvidia:
+                    die(
+                        "failed to start container with GPU access. "
+                        "Host needs an NVIDIA driver and nvidia-container-toolkit "
+                        f"with CDI (device nvidia.com/gpu=all).\n{detail}"
+                    )
+                if x11:
+                    die(
+                        "failed to start container with X11 access. "
+                        "Host needs a working X server, WSLg, or ssh -Y "
+                        f"with DISPLAY set.\n{detail}"
+                    )
+                die(f"failed to start container {name}\n{detail}")
+            copy_auth_if_present(name)
+            if x11:
+                sync_xauthority(name)
+            provision(name)
+            if nvidia:
+                provision_nvidia(name)
+            if x11:
+                provision_x11(name)
+            say(
+                f"initialized {name}"
+                + init_features_suffix(nvidia=nvidia, x11=x11)
+            )
+            return
+
+        require_owned_container(name, directory)
+        has_nvidia = container_has_nvidia(name)
+        has_x11 = container_has_x11(name)
+        if nvidia and not has_nvidia:
+            die(
+                f"{name} already exists without GPU access; "
+                f"run 'clankbox rm' then 'clankbox init --nvidia'"
+            )
+        if x11 and not has_x11:
+            die(
+                f"{name} already exists without X11 access; "
+                f"run 'clankbox rm' then 'clankbox init --x11'"
+            )
+
+        if state == "paused":
+            die(f"container {name} is paused; run 'podman unpause {name}' or recreate it")
+        if state != "running":
+            info(f"starting container {name}")
+            start_container(name, nvidia=has_nvidia)
+            copy_auth_if_present(name)
+
+        if has_x11:
+            sync_xauthority(name)
+
+        did_work = False
+        if not is_provisioned(name):
+            provision(name)
+            did_work = True
+        if has_nvidia and not is_nvidia_provisioned(name):
+            provision_nvidia(name)
+            did_work = True
+        if has_x11 and not is_x11_provisioned(name):
+            provision_x11(name)
+            did_work = True
+        if did_work:
+            say(
+                f"initialized {name}"
+                + init_features_suffix(nvidia=has_nvidia, x11=has_x11)
+            )
+            return
+        say(f"already initialized ({name})")
+
+
+def exec_in(name: str, command: list[str]) -> None:
+    args = [
+        "podman",
+        "exec",
+        "-i",
+        "-w",
+        "/workspace",
+        "-e",
+        f"TERM={os.environ.get('TERM', 'xterm-256color')}",
+        "-e",
+        "LANG=C.UTF-8",
+        "-e",
+        "LC_ALL=C.UTF-8",
+    ]
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        args.insert(2, "-t")
+    if container_has_x11(name):
+        sync_xauthority(name)
+        args.extend(x11_exec_env_args())
+    for key in passthrough_env():
+        if os.environ.get(key):
+            args.extend(["-e", key])
+    args.extend([name, *command])
+    os.execvp("podman", args)
+
+
+def cmd_list(args: list[str]) -> None:
+    require_no_extra_args(args, "list")
+    need_podman()
+    result = run(
+        [
+            "podman",
+            "ps",
+            "-a",
+            "--filter",
+            f"label={LABEL_KEY}=1",
+            "--format",
+            "{{.Names}}\t{{.Status}}",
+        ],
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        die(f"failed to list clankbox containers\n{detail}")
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    if not lines:
+        say("no clankbox containers")
+        return
+    print(f"{'NAMES':<24} {'STATUS':<28} WORKDIR")
+    for line in lines:
+        name, _, status = line.partition("\t")
+        work = container_label(name, LABEL_WORKDIR) or ""
+        work_disp = _CONTROL_CHARS.sub("?", work)
+        print(f"{name:<24} {status:<28} {work_disp}")
+
+
+def human_size(num: int | float) -> str:
+    n = float(num)
+    for unit, suffix in (
+        (1_000_000_000_000, "T"),
+        (1_000_000_000, "G"),
+        (1_000_000, "M"),
+        (1_000, "K"),
+    ):
+        if n >= unit:
+            value = n / unit
+            if value >= 100:
+                return f"{value:.0f}{suffix}"
+            if value >= 10:
+                return f"{value:.1f}{suffix}"
+            return f"{value:.2f}{suffix}"
+    return f"{int(n)}B"
+
+
+def cmd_df(args: list[str]) -> None:
+    require_no_extra_args(args, "df")
+    need_podman()
+    names = list_clankbox_names(all_containers=True)
+
+    image_size = 0
+    image_inspect = run(
+        ["podman", "image", "inspect", "-f", "{{.Size}}", IMAGE],
+        check=False,
+        capture=True,
+    )
+    if image_inspect.returncode == 0:
+        raw = (image_inspect.stdout or "").strip()
+        if raw.isdigit():
+            image_size = int(raw)
+    elif not _inspect_not_found(image_inspect.stderr or "", image_inspect.stdout or ""):
+        detail = (image_inspect.stderr or image_inspect.stdout or "").strip()
+        die(f"failed to inspect image {IMAGE}\n{detail}")
+
+    if not names and image_size == 0:
+        say("no clankbox containers or image")
+        return
+
+    total_rw = 0
+    if names:
+        print(f"{'NAMES':<24} {'SIZE':>8} {'VIRTUAL':>8}  WORKDIR")
+        for name in names:
+            inspect = run(
+                [
+                    "podman",
+                    "inspect",
+                    "--size",
+                    "-f",
+                    (
+                        "{{.SizeRw}}\t{{.SizeRootFs}}\t"
+                        f'{{{{index .Config.Labels "{LABEL_WORKDIR}"}}}}'
+                    ),
+                    name,
+                ],
+                check=False,
+                capture=True,
+            )
+            size_rw = 0
+            size_root = 0
+            work = ""
+            if inspect.returncode != 0:
+                detail = (inspect.stderr or inspect.stdout or "").strip()
+                die(f"failed to inspect {name}\n{detail}")
+            parts = (inspect.stdout or "").strip().split("\t")
+            if (
+                len(parts) >= 1
+                and parts[0] not in ("", "<nil>")
+                and parts[0].lstrip("-").isdigit()
+            ):
+                size_rw = int(parts[0])
+            if (
+                len(parts) >= 2
+                and parts[1] not in ("", "<nil>")
+                and parts[1].lstrip("-").isdigit()
+            ):
+                size_root = int(parts[1])
+            if len(parts) >= 3:
+                work = _CONTROL_CHARS.sub("?", parts[2])
+            total_rw += max(size_rw, 0)
+            print(
+                f"{name:<24} {human_size(max(size_rw, 0)):>8} "
+                f"{human_size(max(size_root, 0)):>8}  {work}"
+            )
+        print()
+
+    print(f"{'ITEM':<32} {'SIZE':>8}")
+    if image_size:
+        print(f"{IMAGE:<32} {human_size(image_size):>8}")
+    if names:
+        print(f"{'containers (writable)':<32} {human_size(total_rw):>8}")
+        print(
+            f"{'total (image + writable)':<32} "
+            f"{human_size(image_size + total_rw):>8}"
+        )
+
+
+def cmd_rm(args: list[str]) -> None:
+    all_flag = parse_all_flag(args, "rm")
+    need_podman()
+    if all_flag:
+        with container_lock():
+            names = validated_clankbox_names(require_current_schema=False)
+            if not names:
+                say("no clankbox containers to remove")
+                return
+            run(["podman", "rm", "-f", *names], quiet=True)
+            say(f"removed all clankbox containers ({len(names)})")
+        return
+
+    directory = workdir()
+    name = container_name(directory)
+    with container_lock(directory):
+        require_removable_container(name, directory)
+        run(["podman", "rm", "-f", name], quiet=True)
+        say(f"removed {name} ({directory})")
+
+
+def cmd_stop(args: list[str]) -> None:
+    all_flag = parse_all_flag(args, "stop")
+    need_podman()
+    if all_flag:
+        with container_lock():
+            names = validated_clankbox_names(require_current_schema=True)
+            running = [name for name in names if container_state(name) == "running"]
+            if not running:
+                say("no running clankbox containers")
+                return
+            info(f"stopping {len(running)} container(s)")
+            run(["podman", "stop", *running], quiet=True)
+            say(f"stopped all running clankbox containers ({len(running)})")
+        return
+
+    directory = workdir()
+    name = container_name(directory)
+    with container_lock(directory):
+        state = require_owned_container(name, directory)
+        if state == "running":
+            info(f"stopping {name}")
+            run(["podman", "stop", name], quiet=True)
+            say(f"stopped {name}")
+        elif state == "paused":
+            die(f"{name} is paused; unpause or remove it")
+        else:
+            say(f"{name} is not running")
+
+
+def cmd_shell(args: list[str]) -> None:
+    if wants_help(args):
+        die("usage: clankbox shell [-- cmd...]", code=0)
+    need_podman()
+    directory = workdir()
+    guard_workspace(directory)
+    name = container_name(directory)
+    with container_lock(directory):
+        ensure_running(name, directory)
+    if args and args[0] == "--":
+        args = args[1:]
+    if not args:
+        exec_in(name, ["bash", "-l"])
+    else:
+        exec_in(name, ["bash", "-lc", 'exec "$@"', "bash", *args])
+
+
+def cmd_enter(args: list[str]) -> None:
+    if wants_help(args):
+        die("usage: clankbox opencode [args...]", code=0)
+    need_podman()
+    directory = workdir()
+    guard_workspace(directory)
+    name = container_name(directory)
+    print_logo()
+    with container_lock(directory):
+        ensure_running(name, directory)
+    if not args:
+        exec_in(name, ["bash", "-lc", "exec opencode"])
+    else:
+        exec_in(name, ["bash", "-lc", 'exec opencode "$@"', "bash", *args])
+
+
 def _update_one(name: str) -> int:
-    """Run provisioning for one container. Return 0 on success."""
     info(f"updating {name}")
     rc = run(
         [
@@ -1781,8 +1544,8 @@ def _update_one(name: str) -> int:
 
 
 def cmd_update(args: list[str]) -> None:
-    need_podman()
     all_flag = parse_all_flag(args, "update")
+    need_podman()
 
     if all_flag:
         with container_lock():
@@ -1861,11 +1624,12 @@ Usage:
 
 Behavior:
   - Run 'clankbox init' once per project before other commands
-  - Current directory is mounted at /workspace
+  - Current directory is mounted at /workspace (Git optional)
+  - Normal .git directories support staging/commits; hooks/config stay read-only
+  - Linked worktrees / submodule checkouts are unsupported for in-container Git
   - One container per absolute path (reused after exit)
-  - If the container is already running, a new exec session joins it
   - Network is enabled; common CLI tools are preinstalled
-  - Tool versions are pinned in artifacts.json (reviewed hashes)
+  - Tool versions are pinned in the launcher; reinstall the launcher to bump pins
   - Requires rootless podman
   - init --nvidia needs host NVIDIA driver + nvidia-container-toolkit (CDI)
   - init --x11 needs host DISPLAY (local/WSLg socket or ssh -Y); uses host network"""
@@ -1876,7 +1640,7 @@ def main(argv: list[str]) -> None:
     cmd = argv[0] if argv else ""
     rest = argv[1:]
 
-    if cmd in ("help", "-h", "--help"):
+    if cmd in ("help", "-h", "--help", ""):
         cmd_help()
     elif cmd == "init":
         cmd_init(rest)
@@ -1896,8 +1660,6 @@ def main(argv: list[str]) -> None:
         cmd_shell(rest)
     elif cmd in ("opencode", "oc"):
         cmd_enter(rest)
-    elif cmd == "":
-        cmd_help()
     else:
         die(f"unknown command {cmd!r} (try 'clankbox help')")
 

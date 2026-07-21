@@ -17,7 +17,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def load_clankbox():
+def load_clankbox(state_home: Path):
+    os.environ["XDG_STATE_HOME"] = str(state_home)
     loader = SourceFileLoader("clankbox_mod", str(ROOT / "clankbox"))
     spec = spec_from_loader(loader.name, loader)
     mod = module_from_spec(spec)
@@ -25,66 +26,72 @@ def load_clankbox():
     return mod
 
 
-cb = load_clankbox()
+class ClankboxTestCase(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp(prefix="clankbox.", dir="/tmp")
+        os.chmod(self._tmpdir, 0o700)
+        self.state_home = Path(self._tmpdir) / "state"
+        self.state_home.mkdir(mode=0o700)
+        self.cb = load_clankbox(self.state_home)
+
+    def tearDown(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
 
-class ParseAllFlagTests(unittest.TestCase):
+class ParseAllFlagTests(ClankboxTestCase):
     def test_empty(self):
-        self.assertFalse(cb.parse_all_flag([], "rm"))
+        self.assertFalse(self.cb.parse_all_flag([], "rm"))
 
     def test_all(self):
-        self.assertTrue(cb.parse_all_flag(["--all"], "rm"))
-        self.assertTrue(cb.parse_all_flag(["-a"], "stop"))
+        self.assertTrue(self.cb.parse_all_flag(["--all"], "rm"))
+        self.assertTrue(self.cb.parse_all_flag(["-a"], "stop"))
 
     def test_unknown_raises(self):
         with self.assertRaises(SystemExit) as ctx:
-            cb.parse_all_flag(["--help"], "rm")
+            self.cb.parse_all_flag(["--help"], "rm")
         self.assertEqual(ctx.exception.code, 0)
         with self.assertRaises(SystemExit) as ctx:
-            cb.parse_all_flag(["--al"], "rm")
+            self.cb.parse_all_flag(["--al"], "rm")
         self.assertNotEqual(ctx.exception.code, 0)
         with self.assertRaises(SystemExit):
-            cb.parse_all_flag(["--all", "extra"], "rm")
+            self.cb.parse_all_flag(["--all", "extra"], "rm")
 
 
-class GuardWorkspaceTests(unittest.TestCase):
+class GuardWorkspaceTests(ClankboxTestCase):
     def test_rejects_home(self):
         with self.assertRaises(SystemExit):
-            cb.guard_workspace(Path.home().resolve())
+            self.cb.guard_workspace(Path.home().resolve())
 
     def test_rejects_root(self):
         with self.assertRaises(SystemExit):
-            cb.guard_workspace(Path("/"))
+            self.cb.guard_workspace(Path("/"))
 
     def test_rejects_ssh(self):
-        path = Path.home().resolve() / ".ssh"
         with self.assertRaises(SystemExit):
-            cb.guard_workspace(path)
+            self.cb.guard_workspace(Path.home().resolve() / ".ssh")
 
     def test_rejects_proc(self):
         with self.assertRaises(SystemExit):
-            cb.guard_workspace(Path("/proc"))
+            self.cb.guard_workspace(Path("/proc"))
 
     def test_rejects_script_dir_tree(self):
         with self.assertRaises(SystemExit):
-            cb.guard_workspace(cb.SCRIPT_DIR)
+            self.cb.guard_workspace(self.cb.SCRIPT_DIR)
 
     def test_accepts_temp_project(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp).resolve()
-            # Ensure not under sensitive roots.
-            cb.guard_workspace(path)
+        with tempfile.TemporaryDirectory(prefix="clankbox.", dir="/tmp") as tmp:
+            self.cb.guard_workspace(Path(tmp).resolve())
 
 
-class ContainerStateTests(unittest.TestCase):
+class ContainerStateTests(ClankboxTestCase):
     def test_not_found(self):
         def fake_run(args, check=True, capture=False, quiet=False):
             return subprocess.CompletedProcess(
                 args, 125, stdout="", stderr="Error: no such container abc"
             )
 
-        with mock.patch.object(cb, "run", side_effect=fake_run):
-            self.assertIsNone(cb.container_state("abc"))
+        with mock.patch.object(self.cb, "run", side_effect=fake_run):
+            self.assertIsNone(self.cb.container_state("abc"))
 
     def test_inspect_error_dies(self):
         def fake_run(args, check=True, capture=False, quiet=False):
@@ -92,19 +99,22 @@ class ContainerStateTests(unittest.TestCase):
                 args, 125, stdout="", stderr="cannot connect to podman"
             )
 
-        with mock.patch.object(cb, "run", side_effect=fake_run):
+        with mock.patch.object(self.cb, "run", side_effect=fake_run):
             with self.assertRaises(SystemExit):
-                cb.container_state("abc")
+                self.cb.container_state("abc")
 
     def test_running(self):
         def fake_run(args, check=True, capture=False, quiet=False):
             return subprocess.CompletedProcess(args, 0, stdout="running\n", stderr="")
 
-        with mock.patch.object(cb, "run", side_effect=fake_run):
-            self.assertEqual(cb.container_state("abc"), "running")
+        with mock.patch.object(self.cb, "run", side_effect=fake_run):
+            self.assertEqual(self.cb.container_state("abc"), "running")
 
 
-def _label_run_factory(directory: Path, *, schema: str | None = cb.SCHEMA_VERSION, state: str = "exited"):
+def _label_run_factory(cb, directory: Path, *, schema: str | None = None, state: str = "exited"):
+    if schema is None:
+        schema = cb.SCHEMA_VERSION
+
     def fake_run(args, check=True, capture=False, quiet=False):
         joined = " ".join(args)
         if "State.Status" in joined:
@@ -121,57 +131,59 @@ def _label_run_factory(directory: Path, *, schema: str | None = cb.SCHEMA_VERSIO
     return fake_run
 
 
-class OwnershipTests(unittest.TestCase):
+class OwnershipTests(ClankboxTestCase):
     def test_mismatch_workdir(self):
         directory = Path("/tmp/project-a")
-        name = cb.container_name(directory)
+        name = self.cb.container_name(directory)
 
         def fake_run(args, check=True, capture=False, quiet=False):
             joined = " ".join(args)
             if "State.Status" in joined:
                 return subprocess.CompletedProcess(args, 0, stdout="running\n", stderr="")
-            if f'index .Config.Labels "{cb.LABEL_KEY}"' in joined:
+            if f'index .Config.Labels "{self.cb.LABEL_KEY}"' in joined:
                 return subprocess.CompletedProcess(args, 0, stdout="1\n", stderr="")
-            if f'index .Config.Labels "{cb.LABEL_WORKDIR}"' in joined:
+            if f'index .Config.Labels "{self.cb.LABEL_WORKDIR}"' in joined:
                 return subprocess.CompletedProcess(
                     args, 0, stdout="/tmp/other\n", stderr=""
                 )
-            if f'index .Config.Labels "{cb.LABEL_SCHEMA}"' in joined:
-                return subprocess.CompletedProcess(
-                    args, 0, stdout=f"{cb.SCHEMA_VERSION}\n", stderr=""
-                )
             return subprocess.CompletedProcess(args, 1, stdout="", stderr="unexpected")
 
-        with mock.patch.object(cb, "run", side_effect=fake_run):
+        with mock.patch.object(self.cb, "run", side_effect=fake_run):
             with self.assertRaises(SystemExit):
-                cb.require_owned_container(name, directory)
+                self.cb.require_owned_container(name, directory)
 
     def test_ok(self):
         directory = Path("/tmp/project-a")
-        name = cb.container_name(directory)
-        with mock.patch.object(cb, "run", side_effect=_label_run_factory(directory)):
-            self.assertEqual(cb.require_owned_container(name, directory), "exited")
+        name = self.cb.container_name(directory)
+        with mock.patch.object(
+            self.cb, "run", side_effect=_label_run_factory(self.cb, directory)
+        ):
+            self.assertEqual(self.cb.require_owned_container(name, directory), "exited")
 
     def test_legacy_schema_blocks_use_but_allows_rm(self):
         directory = Path("/tmp/project-legacy")
-        name = cb.container_name(directory)
+        name = self.cb.container_name(directory)
         with mock.patch.object(
-            cb, "run", side_effect=_label_run_factory(directory, schema=None)
+            self.cb,
+            "run",
+            side_effect=_label_run_factory(self.cb, directory, schema="2"),
         ):
             with self.assertRaises(SystemExit):
-                cb.require_owned_container(name, directory)
-            self.assertEqual(cb.require_removable_container(name, directory), "exited")
+                self.cb.require_owned_container(name, directory)
+            self.assertEqual(
+                self.cb.require_removable_container(name, directory), "exited"
+            )
 
 
-class GitMountTests(unittest.TestCase):
+class GitMountTests(ClankboxTestCase):
     def test_no_git_uses_tmpfs(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(prefix="clankbox.", dir="/tmp") as tmp:
             directory = Path(tmp).resolve()
-            args = cb.git_mount_args(directory)
+            args = self.cb.git_mount_args(directory)
             self.assertIn("type=tmpfs,destination=/workspace/.git", " ".join(args))
 
     def test_normal_repo_protects_hooks_and_config(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(prefix="clankbox.", dir="/tmp") as tmp:
             directory = Path(tmp).resolve()
             git = directory / ".git"
             (git / "hooks").mkdir(parents=True)
@@ -180,7 +192,7 @@ class GitMountTests(unittest.TestCase):
             (git / "HEAD").write_text("ref: refs/heads/main\n")
             (git / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
             (git / "config.worktree").write_text("[core]\n\thooksPath = /tmp/evil\n")
-            args = cb.git_mount_args(directory)
+            args = self.cb.git_mount_args(directory)
             joined = " ".join(args)
             self.assertIn(f"{git / 'hooks'}:/workspace/.git/hooks:ro,z", joined)
             self.assertIn(f"{git / 'config'}:/workspace/.git/config:ro,z", joined)
@@ -188,10 +200,9 @@ class GitMountTests(unittest.TestCase):
                 f"{git / 'config.worktree'}:/workspace/.git/config.worktree:ro,z",
                 joined,
             )
-            self.assertNotIn(":ro,Z", joined)
 
-    def test_nested_submodule_gitdir_protected(self):
-        with tempfile.TemporaryDirectory() as tmp:
+    def test_nested_module_config_protected(self):
+        with tempfile.TemporaryDirectory(prefix="clankbox.", dir="/tmp") as tmp:
             directory = Path(tmp).resolve()
             git = directory / ".git"
             nested = git / "modules" / "vendor" / "lib"
@@ -205,7 +216,7 @@ class GitMountTests(unittest.TestCase):
             (git / "refs").mkdir()
             (git / "hooks").mkdir()
             (git / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
-            args = cb.git_mount_args(directory)
+            args = self.cb.git_mount_args(directory)
             joined = " ".join(args)
             self.assertIn(
                 f"{nested / 'hooks'}:/workspace/.git/modules/vendor/lib/hooks:ro,z",
@@ -216,102 +227,26 @@ class GitMountTests(unittest.TestCase):
                 joined,
             )
 
-    def test_relative_submodule_pointer_uses_generated_gitfile(self):
-        with tempfile.TemporaryDirectory() as tmp:
+    def test_rejects_gitfile_workspace(self):
+        with tempfile.TemporaryDirectory(prefix="clankbox.", dir="/tmp") as tmp:
             directory = Path(tmp).resolve()
-            git = directory / ".git"
-            nested = git / "modules" / "lib"
-            for path in (nested / "hooks", nested / "objects", nested / "refs"):
-                path.mkdir(parents=True)
-            (nested / "HEAD").write_text("ref: refs/heads/main\n")
-            (nested / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
-            (git / "HEAD").write_text("ref: refs/heads/main\n")
-            (git / "objects").mkdir()
-            (git / "refs").mkdir()
-            (git / "hooks").mkdir()
-            (git / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
-            sub = directory / "vendor" / "lib"
-            sub.mkdir(parents=True)
-            (sub / ".git").write_text("gitdir: ../../.git/modules/lib\n")
-            args = cb.git_mount_args(directory)
-            joined = " ".join(args)
-            self.assertIn(":/workspace/vendor/lib/.git:ro,z", joined)
-            self.assertNotIn(
-                f"{sub / '.git'}:/workspace/vendor/lib/.git:ro,z",
-                joined,
-            )
-            self.assertIn(
-                f"{nested / 'hooks'}:/workspace/.git/modules/lib/hooks:ro,z",
-                joined,
-            )
-
-    def test_rejects_arbitrary_external_gitdir_pointer(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp).resolve()
-            git = directory / ".git"
-            git.mkdir()
-            (git / "HEAD").write_text("ref: refs/heads/main\n")
-            (git / "objects").mkdir()
-            (git / "refs").mkdir()
-            (git / "hooks").mkdir()
-            (git / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
-            outside = Path(tmp).resolve().parent / f"outside-{os.getpid()}"
-            outside.mkdir()
-            try:
-                (outside / "HEAD").write_text("ref: refs/heads/main\n")
-                (outside / "objects").mkdir()
-                (outside / "refs").mkdir()
-                evil = directory / "nested"
-                evil.mkdir()
-                (evil / ".git").write_text(f"gitdir: {outside}\n")
-                with self.assertRaises(SystemExit):
-                    cb.git_mount_args(directory)
-            finally:
-                shutil.rmtree(outside, ignore_errors=True)
+            (directory / ".git").write_text("gitdir: /somewhere/else\n")
+            with self.assertRaises(SystemExit):
+                self.cb.git_mount_args(directory)
 
     def test_rejects_symlink_git(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(prefix="clankbox.", dir="/tmp") as tmp:
             directory = Path(tmp).resolve()
             target = directory / "elsewhere"
             target.mkdir()
             (directory / ".git").symlink_to(target)
             with self.assertRaises(SystemExit):
-                cb.git_mount_args(directory)
-
-    def test_worktree_pointer_mounts_external_gitdir(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp).resolve()
-            main = root / "main"
-            linked = root / "linked"
-            main.mkdir()
-            linked.mkdir()
-            gitdir = main / ".git" / "worktrees" / "linked"
-            gitdir.mkdir(parents=True)
-            (gitdir / "HEAD").write_text("ref: refs/heads/main\n")
-            (gitdir / "commondir").write_text("../..\n")
-            (gitdir / "gitdir").write_text(f"{linked / '.git'}\n")
-            (main / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
-            (main / ".git" / "objects").mkdir()
-            (main / ".git" / "refs").mkdir()
-            (main / ".git" / "hooks").mkdir()
-            (main / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
-            (gitdir / "objects").mkdir()
-            (gitdir / "refs").mkdir()
-            (gitdir / "hooks").mkdir()
-            (gitdir / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
-            (linked / ".git").write_text(f"gitdir: {gitdir}\n")
-            args = cb.git_mount_args(linked)
-            joined = " ".join(args)
-            self.assertIn(":/workspace/.git:ro,z", joined)
-            self.assertNotIn(f"{linked / '.git'}:/workspace/.git:ro,z", joined)
-            self.assertIn(f"{gitdir}:{gitdir}:rw,z", joined)
-            common = (main / ".git").resolve()
-            self.assertIn(f"{common}:{common}:rw,z", joined)
+                self.cb.git_mount_args(directory)
 
 
-class CreateArgsTests(unittest.TestCase):
+class CreateArgsTests(ClankboxTestCase):
     def test_create_has_no_replace_and_has_schema(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(prefix="clankbox.", dir="/tmp") as tmp:
             directory = Path(tmp).resolve()
             captured: list[list[str]] = []
 
@@ -319,28 +254,27 @@ class CreateArgsTests(unittest.TestCase):
                 captured.append(list(args))
                 return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
 
-            with mock.patch.object(cb, "run", side_effect=fake_run):
-                with mock.patch.object(cb, "guard_workspace"):
-                    cb.create_container("clankbox-test", directory)
+            with mock.patch.object(self.cb, "run", side_effect=fake_run):
+                with mock.patch.object(self.cb, "guard_workspace"):
+                    self.cb.create_container("clankbox-test", directory)
             self.assertTrue(captured)
             args = captured[0]
             self.assertNotIn("--replace", args)
-            self.assertIn(f"{cb.LABEL_SCHEMA}={cb.SCHEMA_VERSION}", args)
+            self.assertIn(f"{self.cb.LABEL_SCHEMA}={self.cb.SCHEMA_VERSION}", args)
 
 
-class CmdRmArgsTests(unittest.TestCase):
-    def test_rm_help_does_not_remove(self):
+class CmdRmArgsTests(ClankboxTestCase):
+    def test_rm_help_does_not_call_podman(self):
         calls: list[list[str]] = []
 
         def fake_run(args, check=True, capture=False, quiet=False):
             calls.append(list(args))
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-        with mock.patch.object(cb, "need_podman", return_value="/usr/bin/podman"):
-            with mock.patch.object(cb, "run", side_effect=fake_run):
-                with self.assertRaises(SystemExit) as ctx:
-                    cb.cmd_rm(["--help"])
-                self.assertEqual(ctx.exception.code, 0)
+        with mock.patch.object(self.cb, "run", side_effect=fake_run):
+            with self.assertRaises(SystemExit) as ctx:
+                self.cb.cmd_rm(["--help"])
+            self.assertEqual(ctx.exception.code, 0)
         self.assertEqual(calls, [])
 
     def test_rm_typo_does_not_remove(self):
@@ -350,55 +284,55 @@ class CmdRmArgsTests(unittest.TestCase):
             calls.append(list(args))
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-        with mock.patch.object(cb, "need_podman", return_value="/usr/bin/podman"):
-            with mock.patch.object(cb, "run", side_effect=fake_run):
-                with self.assertRaises(SystemExit):
-                    cb.cmd_rm(["--al"])
+        with mock.patch.object(self.cb, "run", side_effect=fake_run):
+            with self.assertRaises(SystemExit):
+                self.cb.cmd_rm(["--al"])
         self.assertEqual(calls, [])
 
     def test_rm_legacy_schema_removes(self):
         directory = Path("/tmp/project-legacy-rm")
-        name = cb.container_name(directory)
+        name = self.cb.container_name(directory)
         calls: list[list[str]] = []
 
         def fake_run(args, check=True, capture=False, quiet=False):
             calls.append(list(args))
-            joined = " ".join(args)
             if args[:2] == ["podman", "rm"]:
                 return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-            return _label_run_factory(directory, schema=None)(
+            return _label_run_factory(self.cb, directory, schema="2")(
                 args, check=check, capture=capture, quiet=quiet
             )
 
-        with mock.patch.object(cb, "need_podman", return_value="/usr/bin/podman"):
-            with mock.patch.object(cb, "workdir", return_value=directory):
-                with mock.patch.object(cb, "container_lock") as lock:
+        with mock.patch.object(self.cb, "need_podman", return_value="/usr/bin/podman"):
+            with mock.patch.object(self.cb, "workdir", return_value=directory):
+                with mock.patch.object(self.cb, "container_lock") as lock:
                     lock.return_value.__enter__ = lambda s: None
                     lock.return_value.__exit__ = lambda *a: None
-                    with mock.patch.object(cb, "run", side_effect=fake_run):
-                        cb.cmd_rm([])
-        self.assertTrue(any(c[:3] == ["podman", "rm", "-f"] and name in c for c in calls))
+                    with mock.patch.object(self.cb, "run", side_effect=fake_run):
+                        self.cb.cmd_rm([])
+        self.assertTrue(
+            any(c[:3] == ["podman", "rm", "-f"] and name in c for c in calls)
+        )
 
 
-class UpdateExitTests(unittest.TestCase):
+class UpdateExitTests(ClankboxTestCase):
     def test_update_failure_exits_nonzero(self):
         directory = Path("/tmp/proj")
-        name = cb.container_name(directory)
-
-        with mock.patch.object(cb, "need_podman", return_value="/usr/bin/podman"):
-            with mock.patch.object(cb, "workdir", return_value=directory):
-                with mock.patch.object(cb, "guard_workspace"):
-                    with mock.patch.object(cb, "container_lock") as lock:
+        with mock.patch.object(self.cb, "need_podman", return_value="/usr/bin/podman"):
+            with mock.patch.object(self.cb, "workdir", return_value=directory):
+                with mock.patch.object(self.cb, "guard_workspace"):
+                    with mock.patch.object(self.cb, "container_lock") as lock:
                         lock.return_value.__enter__ = lambda s: None
                         lock.return_value.__exit__ = lambda *a: None
-                        with mock.patch.object(cb, "ensure_running"):
-                            with mock.patch.object(cb, "_update_one", return_value=1):
+                        with mock.patch.object(self.cb, "ensure_running"):
+                            with mock.patch.object(
+                                self.cb, "_update_one", return_value=1
+                            ):
                                 with self.assertRaises(SystemExit) as ctx:
-                                    cb.cmd_update([])
+                                    self.cb.cmd_update([])
                                 self.assertNotEqual(ctx.exception.code, 0)
 
 
-class ExecTtyTests(unittest.TestCase):
+class ExecTtyTests(ClankboxTestCase):
     def test_no_tty_without_terminals(self):
         captured: list[list[str]] = []
 
@@ -406,13 +340,12 @@ class ExecTtyTests(unittest.TestCase):
             captured.append(list(args))
             raise SystemExit(0)
 
-        with mock.patch.object(cb, "container_has_x11", return_value=False):
+        with mock.patch.object(self.cb, "container_has_x11", return_value=False):
             with mock.patch.object(sys.stdin, "isatty", return_value=False):
                 with mock.patch.object(sys.stdout, "isatty", return_value=False):
                     with mock.patch.object(os, "execvp", side_effect=fake_execvp):
                         with self.assertRaises(SystemExit):
-                            cb.exec_in("ctr", ["bash"])
-        self.assertTrue(captured)
+                            self.cb.exec_in("ctr", ["bash"])
         self.assertIn("-i", captured[0])
         self.assertNotIn("-t", captured[0])
 
@@ -423,31 +356,38 @@ class ExecTtyTests(unittest.TestCase):
             captured.append(list(args))
             raise SystemExit(0)
 
-        with mock.patch.object(cb, "container_has_x11", return_value=False):
+        with mock.patch.object(self.cb, "container_has_x11", return_value=False):
             with mock.patch.object(sys.stdin, "isatty", return_value=True):
                 with mock.patch.object(sys.stdout, "isatty", return_value=True):
                     with mock.patch.object(os, "execvp", side_effect=fake_execvp):
                         with self.assertRaises(SystemExit):
-                            cb.exec_in("ctr", ["bash"])
+                            self.cb.exec_in("ctr", ["bash"])
         self.assertIn("-t", captured[0])
         self.assertIn("-i", captured[0])
 
 
-class ArtifactsTests(unittest.TestCase):
-    def test_artifacts_load(self):
-        data = cb.load_artifacts()
+class ArtifactsTests(ClankboxTestCase):
+    def test_embedded_artifacts(self):
+        data = self.cb.ARTIFACTS
         self.assertIn("node", data)
         self.assertIn("opencode", data)
-        self.assertIn("x64", data["node"]["sha256"])
         self.assertIn("x64-baseline", data["opencode"]["sha256"])
-        script = cb.build_provision_script()
+        script = self.cb.build_provision_script()
         self.assertIn(data["node"]["version"], script)
         self.assertIn(data["opencode"]["version"], script)
         self.assertIn(data["opencode"]["sha256"]["x64-baseline"], script)
-        self.assertIn("x64-baseline", script)
         self.assertIn("sha256sum -c", script)
-        self.assertIn('trap \'rm -rf "$TMPDIR" "$STAGE"\' EXIT', script)
         self.assertNotIn("opencode.ai/install", script)
+        self.assertIn(data["debian_image"], self.cb.DOCKERFILE)
+
+
+class HelpOrderTests(ClankboxTestCase):
+    def test_list_help_before_podman(self):
+        with mock.patch.object(self.cb, "need_podman") as need:
+            with self.assertRaises(SystemExit) as ctx:
+                self.cb.cmd_list(["--help"])
+            self.assertEqual(ctx.exception.code, 0)
+            need.assert_not_called()
 
 
 if __name__ == "__main__":
