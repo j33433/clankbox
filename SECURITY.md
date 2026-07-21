@@ -20,7 +20,7 @@ Clankbox reduces risk but does not eliminate it.
 - **Token refresh drift** if host and container auth copies diverge.
 - **Git credentials over SSH.** Private keys are not mounted.
 - **Workspace writes** that later execute on the host (`Makefile`, CI configs, etc.).
-- **Git residual risk.** Commits and object stores remain agent-writable by design. Read-only config means in-container `git config` / remote edits fail; do those on the host when needed. Nested independent `.git` directories inside the workspace are not recursively protected beyond the primary repo modules tree.
+- **Git residual risk.** Commits and object stores remain agent-writable by design. Read-only config means in-container `git config` / remote edits fail; do those on the host when needed. Nested independent `.git` directories inside the workspace are not protected. Workspace-side submodule pointer files (for example `vendor/lib/.git`) also remain writable; only admin paths under the primary `.git/modules` tree are overlaid read-only.
 - **X11** with `init --x11` (display access and host networking).
 - **Installer location.** Install a copied launcher outside sandboxed workspaces.
 

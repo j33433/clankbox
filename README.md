@@ -11,7 +11,7 @@ An autonomous agent runs shell commands and edits files with your real credentia
 - **Filesystem scope.** The agent sees only the bind-mounted workspace, not your whole home directory or other projects. Sensitive host paths (for example `~/.ssh`, `/proc`, runtime dirs) are rejected.
 - **Credential exposure is bounded.** Host auth is mounted read-only, private SSH keys are not mounted, and only specific API key env vars are forwarded at exec time. Network is enabled, so the agent can still exfiltrate what it can read.
 - **`sudo` without host-root privileges.** Passwordless sudo inside the container maps to your unprivileged host user under rootless podman, not real root. Rootful podman is refused.
-- **Git hooks and config are protected when present.** For a normal repository root (`.git` directory), hooks/config stay read-only while index/objects/refs remain writable so the agent can stage and commit. Git is optional; non-git directories work. Linked worktrees and submodule checkouts are unsupported for in-container Git.
+- **Git hooks and config are protected when present.** For a normal repository root (`.git` directory), hooks/config and `.git/modules` admin paths stay read-only while index/objects/refs remain writable so the agent can stage and commit. Git is optional; non-git directories work. Linked worktrees and submodule checkouts used as the workspace root are unsupported for in-container Git.
 - **Reversible.** Throw away a bad state with `clankbox rm`; the image is shared and rebuildable.
 - **Pinned tools.** Node.js, opencode, and the NVIDIA keyring package use versions and SHA-256 hashes embedded in the launcher. Apt upgrades inside the container remain rolling.
 

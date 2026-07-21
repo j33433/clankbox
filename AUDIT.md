@@ -5,8 +5,9 @@ Branch: `audit`.
 ## Findings (original) and status
 
 1. **Git protections bypassable** — **mitigated (simplified).** Normal `.git`
-   directory roots only; modules under `.git/modules` protected; `.git` file
-   layouts rejected; non-git dirs use tmpfs over `.git`.
+   directory roots only; modules under `.git/modules` protected; workspace-root
+   `.git` file layouts rejected; non-git dirs use tmpfs over `.git`. Residual:
+   nested workspace `.git` dirs and submodule pointer files remain writable.
 2. **Symlink install exposes launcher** — **mitigated.** Docs use
    `install -m 0755` copy; source tree refused as workspace.
 3. **Sensitive workspace paths** — **mitigated.** Denylist.

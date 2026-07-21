@@ -3,7 +3,7 @@
 | Concern | Approach |
 |--------|----------|
 | Workspace | Current directory bind-mounted at `/workspace`; sensitive host paths rejected; Git optional |
-| Git hooks/config | Only normal `.git` directories at the workspace root; hooks/config/attributes and `.git/modules` admin paths read-only; index/objects/refs writable for commits; `.git` file layouts unsupported; non-git dirs get tmpfs over `/workspace/.git` |
+| Git hooks/config | Only normal `.git` directories at the workspace root; hooks/config/attributes and `.git/modules` admin paths read-only; index/objects/refs writable for commits; workspace-root `.git` file layouts unsupported; nested submodule pointer files not specially mounted; non-git dirs get tmpfs over `/workspace/.git` |
 | Identity | One container name per absolute path hash; labels `clankbox=1` and workdir validated; current schema required except for removal |
 | Reuse | Container kept with `sleep infinity`; sessions use `podman exec` |
 | Network | Default podman networking (on) |
