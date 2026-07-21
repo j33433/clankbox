@@ -237,21 +237,50 @@ def host_xauthority() -> Path | None:
     return None
 
 
+def display_uses_unix_socket(display: str) -> bool:
+    """True for DISPLAY values that talk to a local X11 unix socket."""
+    return display.startswith(":") or display.startswith("unix:")
+
+
 def require_x11_host() -> str:
     """Validate host X11 setup; return DISPLAY value."""
     display = os.environ.get("DISPLAY")
     if not display:
         die(
-            "DISPLAY is not set. Start an X server (or WSLg) and export DISPLAY "
-            "(e.g. DISPLAY=:0) before 'clankbox init --x11'"
+            "DISPLAY is not set. Start an X server (or WSLg), or ssh -Y, and "
+            "export DISPLAY before 'clankbox init --x11'"
         )
-    if not X11_SOCKET_DIR.is_dir():
+    # Local/WSLg unix sockets need /tmp/.X11-unix. SSH -Y uses TCP to
+    # localhost and is handled via --network=host (no socket required).
+    if display_uses_unix_socket(display) and not X11_SOCKET_DIR.is_dir():
         die(
-            f"X11 socket directory {X11_SOCKET_DIR} not found. "
-            "Unix-socket displays (e.g. DISPLAY=:0) are required for "
-            "'clankbox init --x11' on Linux and WSL2/WSLg"
+            f"X11 socket directory {X11_SOCKET_DIR} not found for DISPLAY={display}. "
+            "For local/WSLg displays the host X server must expose that path. "
+            "For SSH X11 forwarding use ssh -Y (DISPLAY like localhost:10.0)."
         )
     return display
+
+
+def x11_exec_env_args() -> list[str]:
+    """podman exec -e args so the guest sees the current host display."""
+    args: list[str] = []
+    if display := os.environ.get("DISPLAY"):
+        args.extend(["-e", f"DISPLAY={display}"])
+    if host_xauthority() is not None:
+        args.extend(["-e", "XAUTHORITY=/home/clank/.Xauthority"])
+    return args
+
+
+def sync_xauthority(name: str) -> None:
+    """Copy the host Xauthority cookie file into the container if present."""
+    xauth = host_xauthority()
+    if xauth is None:
+        return
+    run(
+        ["podman", "cp", str(xauth), f"{name}:/home/clank/.Xauthority"],
+        check=False,
+        quiet=True,
+    )
 
 
 def init_features_suffix(*, nvidia: bool, x11: bool) -> str:
@@ -319,27 +348,25 @@ def create_container(
         )
     if x11:
         assert display is not None
+        # Host network so SSH -Y DISPLAY=localhost:N reaches the host sshd
+        # X11 proxy (bridge netns would make localhost the container itself).
         args.extend(
             [
+                "--network",
+                "host",
                 "--label",
                 f"{LABEL_X11}=1",
                 "-e",
                 f"DISPLAY={display}",
-                "-v",
-                f"{X11_SOCKET_DIR}:{X11_SOCKET_DIR}:ro",
             ]
         )
+        if X11_SOCKET_DIR.is_dir():
+            args.extend(["-v", f"{X11_SOCKET_DIR}:{X11_SOCKET_DIR}:ro"])
         if is_wsl() and WSLG_DIR.is_dir():
             args.extend(["-v", f"{WSLG_DIR}:{WSLG_DIR}:ro"])
-        if xauth := host_xauthority():
-            args.extend(
-                [
-                    "-v",
-                    f"{xauth}:/home/clank/.Xauthority:ro,z",
-                    "-e",
-                    "XAUTHORITY=/home/clank/.Xauthority",
-                ]
-            )
+        if host_xauthority() is not None:
+            # Cookie file is copied in after start (path can change per ssh -Y).
+            args.extend(["-e", "XAUTHORITY=/home/clank/.Xauthority"])
     if colorterm := os.environ.get("COLORTERM"):
         args.extend(["-e", f"COLORTERM={colorterm}"])
 
@@ -407,8 +434,8 @@ def create_container(
         if x11:
             die(
                 "failed to create container with X11 access. "
-                "Host needs a working X server (or WSLg) with DISPLAY set "
-                f"and {X11_SOCKET_DIR} available.\n{detail}"
+                "Host needs a working X server, WSLg, or ssh -Y with DISPLAY set.\n"
+                f"{detail}"
             )
         die(f"failed to create container\n{detail}")
 
@@ -503,9 +530,11 @@ def provision_nvidia(name: str) -> None:
 def provision_x11(name: str) -> None:
     """Install basic X11 libraries/apps and verify display access."""
     info("provisioning X11 libraries")
+    sync_xauthority(name)
     run(
         [
             "podman", "exec", "-t", "-w", "/workspace",
+            *x11_exec_env_args(),
             name, "bash", "-lc", X11_PROVISION_SCRIPT,
         ]
     )
@@ -550,6 +579,8 @@ def require_container(name: str, directory: Path) -> None:
         info(f"starting container {name}")
         start_container(name)
         copy_auth_if_present(name)
+    if container_has_x11(name):
+        sync_xauthority(name)
     if not is_provisioned(name):
         provision(name)
     if container_has_nvidia(name) and not is_nvidia_provisioned(name):
@@ -593,11 +624,13 @@ def cmd_init(args: list[str]) -> None:
                 if x11:
                     die(
                         "failed to start container with X11 access. "
-                        "Host needs a working X server (or WSLg) with DISPLAY set "
-                        f"and {X11_SOCKET_DIR} available.\n{detail}"
+                        "Host needs a working X server, WSLg, or ssh -Y "
+                        f"with DISPLAY set.\n{detail}"
                     )
                 die(f"failed to start container {name}\n{detail}")
             copy_auth_if_present(name)
+            if x11:
+                sync_xauthority(name)
             provision(name)
             if nvidia:
                 provision_nvidia(name)
@@ -626,6 +659,9 @@ def cmd_init(args: list[str]) -> None:
             info(f"starting container {name}")
             start_container(name, nvidia=has_nvidia)
             copy_auth_if_present(name)
+
+        if has_x11:
+            sync_xauthority(name)
 
         did_work = False
         if not is_provisioned(name):
@@ -661,11 +697,8 @@ def exec_in(name: str, command: list[str]) -> None:
         f"LC_ALL={os.environ.get('LC_ALL') or os.environ.get('LANG', 'C.UTF-8')}",
     ]
     if container_has_x11(name):
-        if display := os.environ.get("DISPLAY"):
-            args.extend(["-e", f"DISPLAY={display}"])
-        # Cookie file is bind-mounted at create time to this fixed path.
-        if host_xauthority() is not None:
-            args.extend(["-e", "XAUTHORITY=/home/clank/.Xauthority"])
+        sync_xauthority(name)
+        args.extend(x11_exec_env_args())
     for key in passthrough_env():
         if os.environ.get(key):
             args.extend(["-e", key])
@@ -939,8 +972,8 @@ sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 echo "clankbox: verifying X11 display access (xdpyinfo)"
 if ! xdpyinfo >/dev/null; then
-    echo "clankbox: xdpyinfo failed. Host needs a working X server (or WSLg)" >&2
-    echo "clankbox: with DISPLAY set and /tmp/.X11-unix available." >&2
+    echo "clankbox: xdpyinfo failed. Host needs a working X server, WSLg," >&2
+    echo "clankbox: or ssh -Y with DISPLAY set (and XAUTHORITY when required)." >&2
     exit 1
 fi
 
@@ -990,9 +1023,11 @@ def cmd_update(args: list[str]) -> None:
                     ).returncode
                 if rc == 0 and container_has_x11(name):
                     info(f"updating X11 packages in {name}")
+                    sync_xauthority(name)
                     rc = run(
                         [
                             "podman", "exec", "-t", "-w", "/workspace",
+                            *x11_exec_env_args(),
                             name, "bash", "-lc", X11_PROVISION_SCRIPT,
                         ],
                         check=False,
@@ -1028,9 +1063,11 @@ def cmd_update(args: list[str]) -> None:
             ).returncode
         if rc == 0 and container_has_x11(name):
             info(f"updating X11 packages in {name}")
+            sync_xauthority(name)
             rc = run(
                 [
                     "podman", "exec", "-t", "-w", "/workspace",
+                    *x11_exec_env_args(),
                     name, "bash", "-lc", X11_PROVISION_SCRIPT,
                 ],
                 check=False,
@@ -1070,7 +1107,7 @@ Behavior:
   - If the container is already running, a new exec session joins it
   - Network is enabled; common CLI tools are preinstalled
   - init --nvidia needs host NVIDIA driver + nvidia-container-toolkit (CDI)
-  - init --x11 needs host DISPLAY and /tmp/.X11-unix (Linux or WSL2/WSLg)"""
+  - init --x11 needs host DISPLAY (local/WSLg socket or ssh -Y); uses host network"""
     )
 
 

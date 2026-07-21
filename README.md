@@ -72,13 +72,15 @@ host needs an NVIDIA driver and [nvidia-container-toolkit](https://docs.nvidia.c
 with CDI. To enable GPU on an existing container: `clankbox rm` then
 `clankbox init --nvidia`.
 
-`init --x11` mounts the host X11 socket (`/tmp/.X11-unix`), forwards `DISPLAY`
-(and `XAUTHORITY` when present), and on WSL2/WSLg also mounts `/mnt/wslg`. It
-installs basic X11 client libraries and `xeyes` for a quick test
-(`clankbox shell -- xeyes`). Requires a working host display with `DISPLAY` set
-(Linux X server or WSLg). Unix-socket displays such as `:0` are supported.
-Flags can be combined (`init --nvidia --x11`). To enable X11 on an existing
-container: `clankbox rm` then `clankbox init --x11`.
+`init --x11` forwards the host display into the container: mounts `/tmp/.X11-unix`
+when present, mounts `/mnt/wslg` on WSL2/WSLg, copies `XAUTHORITY` cookies each
+session, and uses `--network=host` so SSH X11 forwarding (`ssh -Y`,
+`DISPLAY=localhost:N`) reaches the host sshd proxy the same way host `xeyes`
+does. It installs basic X11 client libraries and `xeyes` for a quick test
+(`clankbox shell -- xeyes`). Requires a working host `DISPLAY` (local X/WSLg or
+an `ssh -Y` session). Host networking is a deliberate tradeoff for X11 only.
+Flags can be combined (`init --nvidia --x11`). To enable or refresh X11 on an
+existing container: `clankbox rm` then `clankbox init --x11`.
 
 From another terminal in the same project directory:
 
@@ -121,7 +123,7 @@ clankbox oc run "explain this repo"
 | API keys | Forwards every `*_API_KEY` env var, plus `GITHUB_TOKEN` / `GH_TOKEN`, at exec time via pass-through (values not in podman args) |
 | Resource limits | 512 PIDs, 4g memory (override via `CLANKBOX_PIDS` / `CLANKBOX_MEMORY`) |
 | GPU (optional) | `init --nvidia`: CDI device `nvidia.com/gpu=all` at create time; CUDA runtime libs provisioned in-container; label `clankbox.nvidia=1` |
-| X11 (optional) | `init --x11`: host `/tmp/.X11-unix` (and `/mnt/wslg` on WSLg); `DISPLAY`/`XAUTHORITY` forwarded; basic X11 libs + `xeyes` provisioned; label `clankbox.x11=1` |
+| X11 (optional) | `init --x11`: `--network=host`; `/tmp/.X11-unix` (+ `/mnt/wslg` on WSLg); `DISPLAY` forwarded and `XAUTHORITY` synced each session; basic X11 libs + `xeyes`; label `clankbox.x11=1` |
 
 Containers are labeled `clankbox=1` so list/rm can find them. The host wrapper is Python 3 (stdlib only).
 
@@ -167,5 +169,5 @@ Clankbox reduces risk but does not eliminate it. Below is a fuller account of wh
 - **Token refresh drift.** On each start, `auth.json` is re-copied from the host into the container, overwriting any token refresh that happened inside the container; if a provider rotates refresh tokens, the host copy may become stale, so re-authenticate on the host if opencode reports invalid credentials.
 - **Git credentials over SSH.** Private SSH keys are not mounted. Run git commands that need credentials (for example push/pull over SSH) on the host.
 - **Workspace writes are a host escape vector.** The agent can create or modify files in the bind-mounted workspace that later execute on the host outside the sandbox, for example `Makefile`, `.envrc`, `package.json` scripts, and `.github/workflows/*`. Review changes before running them on the host.
-- **X11 display access.** With `init --x11`, the container can connect to the host X server (windows, input, screenshots). Only enable when you need graphical apps inside the sandbox.
+- **X11 display access.** With `init --x11`, the container can connect to the host X server (windows, input, screenshots) and shares the host network namespace (`--network=host`) so SSH `-Y` localhost proxies work. Only enable when you need graphical apps inside the sandbox.
 - **`.gitattributes` is writable.** It can define `filter.*.smudge` / `clean` commands that execute when you run git on the host. Other dangerous git files are not protected because the agent needs to edit them as part of normal development. Review changes before running them on the host.
