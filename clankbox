@@ -947,14 +947,13 @@ NVIDIA_PROVISION_SCRIPT = NVIDIA_PROVISION_SCRIPT_TEMPLATE.replace(
     "__CUDA_RUNTIME_STREAM__", CUDA_RUNTIME_STREAM
 )
 
-# Basic X11 client libraries and xeyes for smoke-testing host display
-# passthrough. Keep the marker path in sync with X11_PROVISION_MARKER above.
+# Basic X11 client libraries for host display passthrough.
+# Keep the marker path in sync with X11_PROVISION_MARKER above.
 X11_PROVISION_SCRIPT = r"""set -euo pipefail
 
-echo "clankbox: installing X11 libraries and xeyes"
+echo "clankbox: installing X11 libraries"
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
-    x11-apps \
     x11-utils \
     libx11-6 \
     libxext6 \
@@ -1082,7 +1081,7 @@ Usage:
   clankbox                      Show this help
   clankbox init [options]       Create and provision a container for this dir
                                 --nvidia: GPU via CDI + CUDA runtime libs
-                                --x11: host display passthrough + xeyes
+                                --x11: host display passthrough
   clankbox opencode [args...]   Run opencode (alias: oc)
   clankbox shell [-- cmd...]    Shell into the container (default: bash)
                                 use -- to pass flags
